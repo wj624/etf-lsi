@@ -10,7 +10,7 @@
 
 ## 📱 手机端访问地址（添加到主屏幕）
 
-> **https://wj624.github.io/etf-lsi/**（由本仓库 `gh-pages` 分支自动发布）
+> **https://wj624.github.io/etf-lsi/**
 
 手机微信 / Safari / Chrome 直接打开上面这个网址，然后：
 
@@ -275,7 +275,7 @@ git remote add origin https://github.com/<你的用户名>/etf-lsi.git
 git push -u origin main
 ```
 
-### 2. 配 3 个 Secrets（仓库 → Settings → Secrets and variables → Actions）
+### 2. 配置密钥（Actions Secrets，必填 4 项）
 
 | Secret | 值 |
 | :--- | :--- |
@@ -303,6 +303,21 @@ git push -u origin main
 
 **网页发布（无需任何 Secret）**：看板由工作流自动发布到本仓库的 `gh-pages` 分支，GitHub Pages 直接托管，使用内置 `GITHUB_TOKEN`，**不再需要 `GH_PAT`**。开启方式：仓库 → Settings → Pages → Source 选 `gh-pages` 分支（首次工作流运行后该分支会自动生成）。
 
+#### 密钥配置清单（必填 4 项，本仓库不含任何明文）
+
+仓库 → **Settings → Secrets and variables → Actions → 新建仓库机密**，逐个添加：
+
+| 机密名称（Name） | 取值来源（切勿写进代码 / 提交仓库） |
+| :--- | :--- |
+| `FRED_API_KEY` | FRED 官网免费申请的 API key：https://fredaccount.stlouisfed.org/apikeys |
+| `ETF_SMTP_USER` | 发件邮箱地址（如 `123456@qq.com`） |
+| `ETF_SMTP_PASS` | 该邮箱的 **SMTP 授权码**（不是登录密码；QQ 邮箱在 设置 → 账户 → 开启 SMTP 后生成 16 位授权码） |
+| `ETF_MAIL_TO`  | 收件邮箱（多个用英文逗号分隔，如 `a@qq.com,b@gmail.com`） |
+
+> **可选（备份通道）**：`ETF_SMTP_USER_2` / `ETF_SMTP_PASS_2` / `ETF_MAIL_TO_2`（第二个发件账号，例如 Gmail 应用专用密码）。
+>
+> ⚠️ **安全约定**：本仓库代码与 git 历史里**绝不内置任何密钥**。FRED key 与邮箱凭证只存在于 ① 你的 Actions Secrets（GitHub 加密存储）或 ② 本地 `email_config.json`（已被 `.gitignore` 忽略，不会上传）。更换 key 时只需在 Secrets 里改值，**代码无需改动**。
+
 ### 3. 触发一次验证
 
 仓库 → **Actions** → 选 `ETF + LSI daily report` → **Run workflow**。
@@ -312,10 +327,7 @@ git push -u origin main
 
 本仓库现已**公开**，看板直接发布到本仓库的 `gh-pages` 分支（GitHub Pages 原生支持公开仓库），无需第二个仓库：
 
-| 仓库 | 可见性 | 内容 |
-| :--- | :--- | :--- |
-| `wj624/etf-lsi-monitor` | 私有 | 全部源码、配置 |
-| `wj624/etf-lsi` | **公开** | 全部源码、配置，以及 `gh-pages` 分支上的 `index.html` / `monitor.png` / 图标 / `manifest.json` |
+> 单一公开仓库 `wj624/etf-lsi`：全部源码、配置在 `main` 分支，看板产物（`index.html` / `monitor.png` / 图标 / `manifest.json`）自动发布到 `gh-pages` 分支（GitHub Pages 托管）。原私有仓库 `etf-lsi-monitor` / `etf-lsi-pages` 已合并迁入，确认无误后可删除。
 
 流水线末尾的 **Publish dashboard to GitHub Pages** 步骤会自动把产物推过去，
 Pages 从该仓库 `gh-pages` 分支根目录发布，网址见文首「📱 手机端访问地址」。
