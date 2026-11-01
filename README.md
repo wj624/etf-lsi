@@ -273,12 +273,41 @@ workflow 最后一步 `check_lsi_status.py` 读它决定这一轮的结论：
 - **`fetch_fred_lsi.py` 里 `lsi.json` 先落盘、最后才 `sys.exit(1)`**，保证有数据就先给看板用。
   `daily_run.py` 里本模块是「失败仅降级不阻断」，所以 ETF 主报告、PNG、邮件都不受影响。
 
+### 4.4 交易所份额（上交所）：三层容错
+
+上交所份额是**逐日单点请求**（`query.sse.com.cn`，一天一次），也是最容易被限流的环节。
+线上真实事故：某轮 `07:13` 出现 `0/10 天成功，失败 10`，而前后两轮是 `10/10` 和 `250/250`。
+根因是 akshare 的 `fund_etf_scale_sse` 内部用 `http.get` **既没有 timeout、也没有重试**，
+服务端返回 HTML 错误页时直接抛 `JSONDecodeError`，一次就丢一天。
+
+现在按三层降级：
+
+| 层 | 做什么 | 细节 |
+| :---: | :--- | :--- |
+| 1 | akshare 通道重试 | `tries=3`，退避 2s / 4s，**带 ±50% 抖动**（避免 4 个线程同步重试形成风暴），最后一次不再空等 |
+| 2 | 失败项串行补抓 | 第 1 轮并发 4 线程跑完，把失败的日期**单线程串行**再跑一遍，间隔 1.5s。并发失败大概率是被限流，降并发才救得回来 |
+| 3 | 直连兜底 | 若 akshare 连 3 次都挂，改直连 `query.sse.com.cn/commonQuery.do`（**同一个接口**），自带 `timeout=25s` + 重试 |
+
+外加一个**熔断器**：连续失败 12 天就判定「接口整段不可用」，剩余日期直接跳过。
+没有它的话，首次回填 320 天 × 3 次重试 × 退避 ≈ 8 分钟纯白等；熔断后 1 分钟内结束。
+
+> **绝不做的兜底**：不用「前一交易日的份额」冒充当天。份额每天在变，顶上去就是假数据。
+> 真实降级路径是上层 `fetch_data.py` 回退到 westock（腾讯）的旧值，并在报告里自带滞后标记。
+
+**直连与 akshare 的一致性已验证**：`510300` 两者都是 `38,866,987,700` 份
+（上交所原始字段 `TOT_VOL` 单位是**万份**，必须 × 10000）。
+
+**失败明细会留在产物里**：`_exchange_shares.json` 的 `meta.sse_failed_dates` 记录具体哪几天没抓到，
+`meta.sse_breaker_tripped` 记录是否触发熔断；Actions 里同时打 `::warning::` 注解。
+缺口不是永久的 —— 下一轮 `pick_todo()` 会把「窗口内缺失的日期 + 尾部 10 天」全部重抓。
+
 ---
 
 ## 五、流水线与产物
 
 ```
 daily_run.py
+ ├─ fetch_exchange.py    交易所官方 ETF 份额/净值（T+0）          → _exchange_shares.json（失败降级）
  ├─ fetch_data.py        沪深300 + 创业板：2 个指数 + 8 只 ETF  → raw_data.json
  ├─ fetch_ratios.py      三大风格/股债比价（周K全周期）        → ratios.json      （失败降级）
  ├─ fetch_fred_lsi.py    FRED 20 序列 + LSI + 20 项报警         → lsi.json         （失败降级）
@@ -292,6 +321,7 @@ daily_run.py
 | :--- | :--- |
 | `config.py` | **中央配置**：`TRACKS`（双宽基）、`RATIO_PAIRS`（三比价）、`FRED_SERIES`、`LSI_TH`（全部阈值）、A股配色 |
 | `common.py` | 公共工具：node / westock-data 定位、子进程取数、markdown 表格解析、中文字体探测、HTTP JSON（含 `fred_csv` CSV 兜底通道）、分位数、SMA |
+| `fetch_exchange.py` | 交易所官方份额/净值（沪市逐日 + 深市区间批量），三层容错 + 熔断，写 `_exchange_shares.json` |
 | `fetch_data.py` | 双宽基取数（并发 8 线程） |
 | `fetch_ratios.py` | 三大比价取数 |
 | `fetch_fred_lsi.py` | FRED 取数 + LSI/GLI/报警/资金流向/四维诊断，并写出 `lsi_status.json` 数据完整性报告 |
@@ -477,6 +507,14 @@ python send_mail.py
 | `FRED_API_KEY` | —（必填，去 Secrets 配置） | FRED API key（不配置则宏观模块降级） |
 | `ETF_REFRESH_TAIL` | `8` | 每次强制重抓的尾部交易日数（份额披露滞后回填） |
 | `ETF_DAYS` | `250` | 分析窗口交易日数 |
+| `ETF_EXCHANGE_DAYS` | `250` | 交易所份额回填窗口（交易日） |
+| `ETF_EXCHANGE_TAIL` | `10` | 每轮强制刷新份额的尾部交易日数 |
+| `ETF_SSE_WORKERS` | `4` | 上交所第 1 轮并发数（调大更容易被限流，不建议 >6） |
+| `ETF_SSE_RETRY` | `3` | 上交所单日重试次数（含直连通道） |
+| `ETF_SSE_PASS2_GAP` | `1.5` | 第 2 轮串行补抓的日间隔（秒） |
+| `ETF_SSE_BREAKER` | `12` | 连续失败多少天触发熔断（跳完剩余日期） |
+| `ETF_MAX_SSE_CALLS` | `320` | 单轮最多抓多少个上交所日期 |
+| `ETF_SZSE_CHUNK` | `20` | 深交所区间请求每段天数（单次上限 65535 行） |
 | `LSI_FETCH_DAYS` | `1560` | FRED 抓取回看自然日 |
 | `LSI_CAL_DAYS` | `820` | 宏观交易日历长度（观测日） |
 | `RATIO_SEG_FROM` | `2010` | 周K分段抓取起始年 |
@@ -488,7 +526,7 @@ python send_mail.py
 
 ## 九、防 Bug 铁律（改动代码前必读）
 
-以下 7 条均来自真实踩坑，严禁回退：
+以下 8 条均来自真实踩坑，严禁回退：
 
 1. **份额披露滞后识别 `_is_stale` 不捆绑 `nav`**
    基金公司每晚会先更新单位净值 `nav`，而份额 `shares` 存在 T+1~T+2 滞后。
@@ -517,6 +555,12 @@ python send_mail.py
    调用 FRED 时必须写成 `common.http_json(url, csv_id=<序列号>, observation_start=start)`。
    只传 url 就等于放弃了第二条通道——JSON API 偶发 500 且重试 3 次不保证命中，
    失败一次就是整条曲线变 null，而且退出码仍是 0，很容易被当成「今天没数据」放过。
+
+8. **上交所份额的「两轮 + 熔断」不能简化成一轮高并发**
+   实测同一接口在不同轮次会给出 `10/10`、`250/250`、`0/10` 三种结果，波动来自同 IP 并发限流。
+   因此第 2 轮**必须是单线程**并拉长间隔（并发重试只会继续撞墙）；
+   同时必须保留熔断，否则接口整段不可用时首次回填会空转 8 分钟以上。
+   **更不允许用前一交易日的份额顶替缺失日**——份额每天变化，顶上去就是假数据。
 
 另外两条工程经验：
 - **`.bat` 文件在中文 Windows 必须用 GBK 编码保存**，UTF-8 会被 `cmd.exe` 按 GBK 解析出错。

@@ -21,7 +21,7 @@
 
 失败不影响主流程：取不到就返回 None，上层回退 westock 原值。
 """
-import json, os, sys, time, datetime
+import json, os, random, sys, threading, time, datetime
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 if BASE not in sys.path:
@@ -34,9 +34,22 @@ WINDOW_DAYS = int(os.environ.get('ETF_EXCHANGE_DAYS', '250'))
 TAIL = int(os.environ.get('ETF_EXCHANGE_TAIL', '10'))
 SSE_WORKERS = int(os.environ.get('ETF_SSE_WORKERS', '4'))
 MAX_SSE_CALLS = int(os.environ.get('ETF_MAX_SSE_CALLS', '320'))
+# 上交所单日重试次数；失败项第二轮补抓的间隔秒数；连续失败多少天后熔断
+SSE_RETRY = int(os.environ.get('ETF_SSE_RETRY', '3'))
+SSE_PASS2_GAP = float(os.environ.get('ETF_SSE_PASS2_GAP', '1.5'))
+SSE_BREAKER = int(os.environ.get('ETF_SSE_BREAKER', '12'))
 # 深交所接口单次返回上限约 65535 行（16-bit），全市场 ETF 约 770 行/交易日，
 # 超过上限时接口不报错而是直接返回空表 —— 必须分段请求，每段留足余量
 SZSE_CHUNK = int(os.environ.get('ETF_SZSE_CHUNK', '20'))
+
+# 上交所份额直连参数（与 akshare 内部用的完全同一接口，只是我们自带 timeout 与重试）
+SSE_URL = 'https://query.sse.com.cn/commonQuery.do'
+SSE_HEADERS = {
+    'Referer': 'https://www.sse.com.cn/',
+    'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                   '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
+    'Accept': '*/*',
+}
 
 SH_CODES, SZ_CODES = [], []
 
@@ -54,15 +67,26 @@ def load_etfs():
     return mapping
 
 
-def _retry(fn, tries=3, gap=2):
+def _retry(fn, tries=3, gap=2, jitter=0.5, label=''):
+    """带退避重试。
+
+    jitter：每轮延迟乘上一个 [1-jitter, 1+jitter] 的随机系数。
+      **多线程必须加**：4 个 worker 同时失败、同时 sleep 同样时长，
+      下一轮就会同时回到服务端形成重试风暴，反而更容易被限流。
+    """
     last = None
     for i in range(tries):
         try:
             return fn()
         except Exception as e:
             last = '%s: %s' % (type(e).__name__, str(e)[:90])
-            time.sleep(gap * (i + 1))
-    raise RuntimeError(last)
+            if i == tries - 1:      # 最后一次不再空等
+                break
+            d = gap * (i + 1)
+            if jitter:
+                d *= random.uniform(1.0 - jitter, 1.0 + jitter)
+            time.sleep(d)
+    raise RuntimeError(('%s ' % label if label else '') + str(last))
 
 
 def get_trade_days(days=520):
@@ -78,12 +102,36 @@ def get_trade_days(days=520):
     return out[-days:]
 
 
-def fetch_sse(date_compact):
-    """上交所单日全部 ETF 份额 -> {code: shares}"""
-    import akshare as ak
-    df = _retry(lambda: ak.fund_etf_scale_sse(date=date_compact), tries=2, gap=2)
-    if df is None or len(df) == 0:
-        return {}
+class _Breaker:
+    """简易熔断器：连续失败达到阈值就认定「接口整段不可用」，后续日期直接跳过。
+
+    为什么需要：首次回填要抓 320 天，每天 3 次重试 × 退避(2/4s) ≈ 6 秒。
+    如果上交所整段挂掉（不是偶发），320 天 ÷ 4 线程 × 6s ≈ 8 分钟纯白等，
+    加上第二轮补抓更久。熔断后直接跳完，1 分钟内结束，缺口交给下一轮补。
+    """
+
+    def __init__(self, limit):
+        self.limit, self.streak, self.tripped = limit, 0, False
+        self._lock = threading.Lock()
+
+    def ok(self):
+        with self._lock:
+            self.streak = 0
+
+    def bad(self):
+        with self._lock:
+            self.streak += 1
+            if self.streak >= self.limit and not self.tripped:
+                self.tripped = True
+                print('  !! 上交所接口连续失败 %d 次，判定整段不可用，本轮熔断跳过剩余日期'
+                      % self.streak, flush=True)
+
+
+_BREAKER = _Breaker(SSE_BREAKER)
+
+
+def _sse_parse_akshare(df):
+    """akshare 版本的 DataFrame -> {code: shares}"""
     code_col = '基金代码' if '基金代码' in df.columns else df.columns[0]
     share_col = '基金份额' if '基金份额' in df.columns else df.columns[-1]
     out = {}
@@ -94,6 +142,73 @@ def fetch_sse(date_compact):
                 out[c] = float(row[share_col])
             except Exception:
                 pass
+    return out
+
+
+def _sse_via_akshare(date_compact):
+    """通道 1：akshare。省事，但它的内部 http.get 没有 timeout、也没有重试，
+    服务端返回 HTML 错误页时会直接抛 JSONDecodeError。"""
+    import akshare as ak
+    df = _retry(lambda: ak.fund_etf_scale_sse(date=date_compact),
+                tries=SSE_RETRY, gap=2, label='[akshare]')
+    if df is None or len(df) == 0:
+        return {}
+    return _sse_parse_akshare(df)
+
+
+def _sse_via_http(date_compact):
+    """通道 2：直连 query.sse.com.cn 的同一个接口（与 akshare 同源），
+    但我们自带 timeout=25s、自带重试，且不依赖 akshare 的版本行为。
+
+    实测两者结果完全一致（510300：TOT_VOL 3886698.77 × 1e4 = 38,866,987,700，
+    与 akshare 输出逐位相同）；上交所原始单位是「万份」，必须 × 10000。
+    """
+    import requests
+    d = '%s-%s-%s' % (date_compact[:4], date_compact[4:6], date_compact[6:])
+    params = {
+        'isPagination': 'true', 'pageHelp.pageSize': '10000',
+        'pageHelp.pageNo': '1', 'pageHelp.beginPage': '1',
+        'pageHelp.cacheSize': '1', 'pageHelp.endPage': '1',
+        'sqlId': 'COMMON_SSE_ZQPZ_ETFZL_XXPL_ETFGM_SEARCH_L',
+        'STAT_DATE': d,
+    }
+
+    def _once():
+        r = requests.get(SSE_URL, params=params, headers=SSE_HEADERS, timeout=25)
+        r.raise_for_status()
+        rows = r.json().get('result') or []
+        out = {}
+        for it in rows:
+            c = str(it.get('SEC_CODE', '')).strip()
+            if c in SH_CODES:
+                try:
+                    out[c] = float(it['TOT_VOL']) * 10000.0    # 万份 -> 份
+                except Exception:
+                    pass
+        return out
+
+    return _retry(_once, tries=SSE_RETRY, gap=2, label='[直连]')
+
+
+def fetch_sse(date_compact):
+    """上交所单日全部 ETF 份额 -> {code: shares}
+
+    三个层次（依次降级）：
+      1. akshare 通道（带 3 次退避重试）
+      2. 直连 query.sse.com.cn（同源、自带 timeout，绕开 akshare 无 timeout 的短板）
+      3. 熔断跳过 —— 前两个通道连续失败达阈值时直接放弃，避免整轮回填卡死
+    空表（接口正常但当天无数据）不算失败，返回 {}。
+    """
+    if _BREAKER.tripped:
+        raise RuntimeError('接口熔断中，本轮跳过')
+    try:
+        out = _sse_via_akshare(date_compact)
+        _BREAKER.ok()
+        return out
+    except Exception as e1:
+        print('  ~ sse %s akshare 通道失败（%s），改直连' % (date_compact, str(e1)[:80]), flush=True)
+    out = _sse_via_http(date_compact)
+    _BREAKER.ok()
     return out
 
 
@@ -164,8 +279,44 @@ def pick_todo(trade_days, have):
     return sorted(todo)
 
 
-def main():
+def _gh_annot(level, msg):
+    """GitHub Actions 注解（本地运行不打印 :: 噪音）"""
+    if os.environ.get('GITHUB_ACTIONS') == 'true':
+        print('::%s::%s' % (level, msg), flush=True)
+
+
+def _compact2dash(dc):
+    """20261030 -> 2026-10-30"""
+    return '%s-%s-%s' % (dc[:4], dc[4:6], dc[6:])
+
+
+def _sse_run(dates, cache, workers, gap=0.0):
+    """跑一轮上交所抓取 -> (成功天数, 仍失败日期列表)
+
+    dates 一律用**紧凑格式 YYYYMMDD**（与 fetch_sse 入参一致），返回的失败清单也是紧凑格式，
+    这样第 2 轮可以直接把失败清单回灌进来；转成带横线只为写缓存 key。
+    接口正常但当天无该 ETF 份额时返回 {}，这种情况既不算成功也不算失败。
+    """
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    ok, failed = 0, []
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        futs = {ex.submit(fetch_sse, dc): dc for dc in dates}
+        for f in as_completed(futs):
+            dc = futs[f]
+            try:
+                m = f.result()
+            except Exception:
+                failed.append(dc)
+            else:
+                if m:
+                    cache['shares'].setdefault(_compact2dash(dc), {}).update(m)
+                    ok += 1
+            if gap:
+                time.sleep(gap)
+    return ok, sorted(failed)
+
+
+def main():
     mapping = load_etfs()
     codes = sorted(set(c for c, _ in mapping.values()))
     print('标的数量: %d（沪 %d / 深 %d）' % (len(codes), len(SH_CODES), len(SZ_CODES)))
@@ -181,6 +332,7 @@ def main():
         print('  %s ~ %s' % (todo[0], todo[-1]))
 
     sse_fail = 0
+    sse_failed_dates = []
     if todo:
         # ---- 深交所：区间批量，但必须分段（单次上限 65535 行）----
         if SZ_CODES:
@@ -198,25 +350,35 @@ def main():
             print('深交所: %d 天（分 %d 段）'
                   % (len(got), (len(todo) + SZSE_CHUNK - 1) // SZSE_CHUNK), flush=True)
 
-        # ---- 上交所：逐日 ----
+        # ---- 上交所：逐日（第 1 轮并发 + 第 2 轮失败项串行补抓）----
         if SH_CODES:
             todo_c = [d.replace('-', '') for d in todo][-MAX_SSE_CALLS:]
             t0 = time.time()
-            got = 0
-            with ThreadPoolExecutor(max_workers=SSE_WORKERS) as ex:
-                futs = {ex.submit(fetch_sse, d): d for d in todo_c}
-                for f in as_completed(futs):
-                    dc = futs[f]
-                    d = '%s-%s-%s' % (dc[:4], dc[4:6], dc[6:])
-                    try:
-                        m = f.result()
-                        if m:
-                            cache['shares'].setdefault(d, {}).update(m)
-                            got += 1
-                    except Exception:
-                        sse_fail += 1
-            print('上交所: %d/%d 天成功，失败 %d，耗时 %.0fs'
-                  % (got, len(todo_c), sse_fail, time.time() - t0), flush=True)
+            got, failed = _sse_run(todo_c, cache, SSE_WORKERS)
+            print('上交所: 第 1 轮 %d/%d 天成功，失败 %d，耗时 %.0fs'
+                  % (got, len(todo_c), len(failed), time.time() - t0), flush=True)
+
+            # 第 2 轮：只补失败的那几天，**单线程串行** + 拉长间隔。
+            # 为什么降并发：上交所接口对同 IP 的并发很敏感，4 个线程同时失败大概率是被限流了；
+            # 再用 4 个线程重试只会继续撞墙，串行 + 1.5s 间隔才是能恢复的姿势。
+            if failed and not _BREAKER.tripped:
+                print('  第 2 轮：串行补抓 %d 天（间隔 %.1fs）...' % (len(failed), SSE_PASS2_GAP), flush=True)
+                ok2, still = _sse_run(failed, cache, 1, gap=SSE_PASS2_GAP)
+                print('  第 2 轮：救回 %d 天，仍失败 %d 天（累计 %.0fs）'
+                      % (ok2, len(still), time.time() - t0), flush=True)
+                got += ok2
+                failed = still
+
+            sse_fail += len(failed)
+            sse_failed_dates = [_compact2dash(x) for x in failed]
+            if failed:
+                print('  !! 仍失败 %d 天：%s%s'
+                      % (len(failed), ' '.join(sse_failed_dates[:10]),
+                         ' ...' if len(failed) > 10 else ''), flush=True)
+                print('  !! 这些日期本轮回退到 westock 旧值（不会用前一天份额冒充）；'
+                      '下一轮会自动重新补抓（尾部 %d 天强制刷新 + 窗口内缺失全部重抓）' % TAIL, flush=True)
+                _gh_annot('warning', '上交所份额有 %d 天两轮抓取均失败（已回退 westock 旧值）：%s'
+                          % (len(failed), '、'.join(sse_failed_dates[:10])))
 
     # ---- 净值：全历史，便宜，每次都刷 ----
     nav = fetch_nav(codes)
@@ -228,6 +390,9 @@ def main():
         'window_days': WINDOW_DAYS,
         'tail': TAIL,
         'sse_fail': sse_fail,
+        # 明细留在产物里，方便事后判断「哪天缺、缺了几次、是不是同一批日期反复失败」
+        'sse_failed_dates': sse_failed_dates[:60],
+        'sse_breaker_tripped': _BREAKER.tripped,
         'days': len(cache['shares']),
     }
     with open(CACHE, 'w', encoding='utf-8') as f:
@@ -236,6 +401,8 @@ def main():
     latest = max(cache['shares']) if cache['shares'] else '-'
     print('已写入 %s | 份额 %d 天，最新 %s | 净值 %d 只'
           % (CACHE, len(cache['shares']), latest, len(cache['nav'])))
+    if sse_fail:
+        print('提示：上交所 %d 天未取到，这些日期在报告中会自动回退 westock 旧值' % sse_fail)
     return 0
 
 
