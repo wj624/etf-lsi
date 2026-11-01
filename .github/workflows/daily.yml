@@ -1,0 +1,136 @@
+name: ETF + LSI daily report
+
+on:
+  # 修改本工作流并提交时立即触发一次（用于验证自动触发生效并激活定时任务）
+  push:
+    branches: [ main ]
+    paths:
+      - ".github/workflows/daily.yml"
+  schedule:
+    # 北京时间 21:17（UTC 13:17），周一至周五，每日执行一次
+    # 【为什么不是 19:00】纽约联储每天美东 08:00 才公布当日 SOFR / EFFR / IORB，
+    #   换算成北京时间 = 夏令时 20:00 / 冬令时 21:00。19:00 跑只能拿到前一天的旧利率。
+    #   21:17 在两种时制下都晚于美东 08:00，同时也晚于沪深交易所晚间披露的 ETF 份额。
+    #   只跑一次，避免一天两封邮件；想当天补跑可用 workflow_dispatch。
+    - cron: "17 13 * * 1-5"
+  workflow_dispatch: {}
+
+# 同仓 main 提交份额缓存 + 推送 gh-pages 都用内置 GITHUB_TOKEN（无需 GH_PAT）
+permissions:
+  contents: write
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    # 40 -> 55：新增 akshare 依赖安装 + 首次 250 个交易日份额回填需要额外余量
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Restore historical data cache
+        uses: actions/cache@v4
+        with:
+          # 只缓存 A股历史与比价（周K，变化慢）。
+          # lsi.json 不缓存：宏观数据必须每天新算，若缓存会在 FRED 抓取失败时
+          # 拿旧文件顶上、把昨天的数据当成今天悄悄发出去。
+          path: |
+            raw_data.json
+            ratios.json
+          key: etf-lsi-data-${{ github.run_id }}
+          restore-keys: |
+            etf-lsi-data-
+
+      - name: Install CJK fonts (中文图表必需)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk
+          fc-cache -f
+
+      - name: Install python deps
+        run: pip install -r requirements.txt
+
+      - name: Run pipeline & send mail
+        env:
+          ETF_SMTP_USER:    ${{ secrets.ETF_SMTP_USER }}
+          ETF_SMTP_PASS:    ${{ secrets.ETF_SMTP_PASS }}
+          ETF_MAIL_TO:      ${{ secrets.ETF_MAIL_TO }}
+          ETF_SMTP_USER_2:  ${{ secrets.ETF_SMTP_USER_2 }}
+          ETF_SMTP_PASS_2:  ${{ secrets.ETF_SMTP_PASS_2 }}
+          ETF_MAIL_TO_2:    ${{ secrets.ETF_MAIL_TO_2 }}
+          FRED_API_KEY:     ${{ secrets.FRED_API_KEY }}
+        run: python daily_run.py
+
+      # 把交易所份额缓存提交回仓库（云端自持）。
+      # 不加 actions/cache：那份缓存 7 天不用会被清掉，届时又要全量重抓 250 天。
+      # 注意本仓库的 push 触发器只监听 daily.yml，提交缓存不会造成自我触发。
+      - name: Persist exchange shares cache
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          # fetch_exchange 是降级模块，若整段失败就不会产出缓存文件，此时直接跳过而不是报错
+          if [ ! -f _exchange_shares.json ]; then
+            echo "!! 未生成份额缓存（fetch_exchange 未成功），跳过提交"
+            exit 0
+          fi
+          git config user.name  "etf-lsi-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
+          git add -f _exchange_shares.json
+          if git diff --staged --quiet; then
+            echo "份额缓存无变化，跳过提交"
+          else
+            git commit -m "chore: update exchange shares cache $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git pull --rebase origin main || { echo "rebase 失败，交由下次调度"; exit 0; }
+            git push origin HEAD:main
+            echo "份额缓存已提交"
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: etf-lsi-report
+          path: |
+            etf_lsi_dashboard.html
+            etf_lsi_monitor_latest.png
+            summary.json
+            ratios.json
+            lsi.json
+          if-no-files-found: ignore
+
+      # 把看板发布到本仓库的 gh-pages 分支（GitHub Pages 原生托管）。
+      # 使用内置 GITHUB_TOKEN，无需任何 PAT；首次运行会自动创建 gh-pages 分支。
+      - name: Publish dashboard to GitHub Pages (gh-pages)
+        if: success()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          if [ ! -f etf_lsi_dashboard.html ]; then
+            echo "!! 未生成看板，跳过 Pages 发布"; exit 0
+          fi
+          mkdir -p public
+          cp etf_lsi_dashboard.html public/index.html
+          cp etf_lsi_monitor_latest.png public/monitor.png 2>/dev/null || true
+          cp icon-180.png icon-192.png icon-512.png public/ 2>/dev/null || true
+          cp manifest.json public/ 2>/dev/null || true
+          touch public/.nojekyll
+          cd public
+          git init -q
+          git config user.name  "etf-lsi-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add -A
+          git commit -q -m "chore: update dashboard $(date -u '+%Y-%m-%d %H:%M UTC')"
+          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" HEAD:gh-pages
+          echo "已发布到 https://wj624.github.io/etf-lsi/"
