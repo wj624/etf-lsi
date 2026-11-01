@@ -176,8 +176,58 @@ def find_cjk_font():
     return ''
 
 
-def http_json(url, timeout=40, retry=3):
-    """GET JSON（带重试），用于 FRED API"""
+_FRED_CSV_URL = 'https://fred.stlouisfed.org/graph/fredgraph.csv?id=%s'
+
+
+def fred_csv(series_id, observation_start=None, timeout=60, retry=3):
+    """免密钥兜底通道：把 fredgraph.csv 解析成 {date: float}。
+
+    为什么需要它：api.stlouisfed.org 在 runner 的共享出口 IP 下会随机返回 HTTP 500
+    （实测同一分钟内 20 个序列有 3 个 500、换一分钟又全部正常），一旦 3 次重试都没
+    命中就整条序列变空字典，进而让 GLI / RRP / DXY 整条曲线变成 null。
+    fredgraph.csv 是网页图表用的后端，入口不同、不限频、不需要 api_key，实测稳定。
+
+    observation_start: 只保留不早于该日期的观测（等价于 API 的 observation_start）。
+    """
+    last = None
+    for i in range(retry):
+        try:
+            req = urllib.request.Request(_FRED_CSV_URL % series_id,
+                                         headers={'User-Agent': 'etf-lsi-monitor/1.0'})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                text = r.read().decode('utf-8', 'replace')
+            out = {}
+            # 首行是表头 observation_date,<SID>；缺失值在 CSV 里是空串（不是 '.'）
+            for ln in text.splitlines()[1:]:
+                p = ln.strip().split(',')
+                if len(p) < 2:
+                    continue
+                d, v = p[0].strip(), p[1].strip()
+                if not d or v in ('', '.', 'NA'):
+                    continue
+                if observation_start and d < observation_start:
+                    continue
+                try:
+                    out[d] = float(v)
+                except ValueError:
+                    continue
+            if out:
+                return out
+            last = RuntimeError('CSV 返回 0 条有效观测')
+        except Exception as e:
+            last = e
+            time.sleep(1.5 * (i + 1))
+    raise RuntimeError('fred_csv failed: %s -> %s' % (series_id, last))
+
+
+def http_json(url, timeout=40, retry=3, csv_id=None, observation_start=None, on_csv=None):
+    """GET JSON（带重试），用于 FRED API。
+
+    csv_id：传 FRED 序列号后，JSON 通道 retry 次全失败时自动改走 fredgraph.csv，
+            并把结果包成 {'observations': [{date, value}, ...]} 返回，
+            调用方拿到的数据结构与 API 一致，不需要改解析逻辑。
+    on_csv：真正走了兜底通道时回调一次，供调用方统计「本轮有几个序列是靠兜底救回来的」。
+    """
     last = None
     for i in range(retry):
         try:
@@ -187,6 +237,13 @@ def http_json(url, timeout=40, retry=3):
         except Exception as e:
             last = e
             time.sleep(1.5 * (i + 1))
+    if csv_id:
+        d = fred_csv(csv_id, observation_start=observation_start)
+        print('  ~~ %-18s JSON 通道 %d 次全失败（%s），已回退 fredgraph.csv：%d 条'
+              % (csv_id, retry, last, len(d)), flush=True)
+        if on_csv:
+            on_csv()
+        return {'observations': [{'date': k, 'value': str(v)} for k, v in sorted(d.items())]}
     raise RuntimeError('http_json failed: %s -> %s' % (url, last))
 
 

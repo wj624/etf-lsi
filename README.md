@@ -212,12 +212,66 @@ GLI (T)   = WALCL − WTREGEN − RRPONTSYD             美联储净流动性总
 **混合频率处理**：FRED 序列有日频（SOFR/EFFR/DGS…）、周频（WALCL/WDTGAL/WLRRAL/WRBWFRBL/DTWEXBGS）、月频（CPI/银行总资产）、季频（GDP）。
 脚本以**日频序列观测日期的并集**构造交易日历（默认取最近 820 个观测日），其余序列按日期**前向填充**，等价于 Pine Script 的 `gaps=barmerge.gaps_off`。
 
+**为什么 `IORB` 不参与构造日历**：`IORB` 是政策利率，FRED 会对**未来日期**预填同一个值
+（实测 2026-11-01 周日就能拿到 2026-11-02 的 3.90），并且序列里含周末行。
+把它并进「日频序列并集」，等于把周末和「明天」塞进交易日历，`lsi.asof` 会被顶到未来
+（线上曾出现 A 股口径 `asof=2026-10-30`、宏观口径 `asof=2026-11-02` 打架）。
+它在 `_CAL_EXCLUDE` 里被排除，**数值照常参与 LSI 计算**（`LSI = (SOFR − RRP) + (EFFR − IORB)`），
+只是不再定义「日历有哪些天」；`build_calendar()` 另有兜底，裁掉任何晚于今天(UTC)的日期。
+
 ### 4.2 明确剔除、不参加计算的 TradingView 私有数据项
 
 1. **`INDEX:S5TH`**（标普500 高于 200 日均线的股票占比）—— 剔除 4 项广度报警
 2. **`TVC:GOLD` / `TVC:SILVER`**（金银比）—— 剔除 `is_gs_low`、`is_gs_high` 与 `state_gold_regime`
 3. **`ECONOMICS:EUCBBS` / `CNCBBS` / `JPCBBS`**（欧/中/日央行资产负债表）—— 剔除三国央行及汇率换算，
    GLI 改用**美联储净流动性**口径：`GLI(T) = WALCL(T) − WTREGEN(T) − RRPONTSYD(T)`
+
+### 4.3 取数容错：JSON 接口挂了会自动改走 CSV
+
+同一个 FRED 序列有两个入口：
+
+| 通道 | 地址 | 需要 key | 特点 |
+| :--- | :--- | :---: | :--- |
+| 官方 JSON API | `api.stlouisfed.org/fred/series/observations` | 需要 | 支持 `observation_start` 裁剪，但**会随机 HTTP 500** |
+| 图表后端 CSV | `fred.stlouisfed.org/graph/fredgraph.csv?id=<序列号>` | 不需要 | 不限频、实测稳定，但只能拿全量历史 |
+
+**为什么必须两条腿走路**：`api.stlouisfed.org` 在 GitHub Actions 的共享出口 IP 下会偶发 500，
+而且既不是「每次都挂」也不是「月初/月末才挂」——实测同一分钟内 20 个序列有 3 个 500、换一分钟全部正常，
+**每轮失败的序列都不一样**，本机用 6 线程连打两轮则 20/20 全过。
+原实现 `retry=3`（退避 1.5 / 3 / 4.5 秒）连续 3 次没命中就放弃，整条序列变成空字典，
+后果是**整条曲线变 null，而不是只缺当天一个点**：
+
+```
+日志：GLI = None T｜RRP = None T
+看板 JSON：{"gli": null, "rrp_T": null, "dxy": null}，hist.gli 500 点全 null
+```
+
+现在 `common.http_json(url, csv_id=<FRED 序列号>)` 在 JSON 通道重试全失败后会自动调用
+`common.fred_csv()` 走 CSV 通道，再把结果包成 `{'observations': [{'date','value'}, ...]}` 原样返回，
+**调用方的解析逻辑一行都不用改**。CSV 通道不支持 `observation_start`，会多下载全量历史
+（最长 6 千行、几十 KB），解析后按 `FETCH_DAYS` 窗口裁剪，与 API 口径保持一致。
+
+**数据完整性报告**：每轮抓完写一份 `lsi_status.json`（不提交进仓库，随 artifacts 上传）：
+
+```json
+{"total": 20, "api_ok": 17, "csv_fallback": ["DTWEXBGS", "RRPONTSYD"],
+ "empty": [], "ok": 19, "checked_at": "2026-11-01 10:51 UTC"}
+```
+
+workflow 最后一步 `check_lsi_status.py` 读它决定这一轮的结论：
+
+| 情形 | Actions 注解 | 退出码 | 看板 |
+| :--- | :--- | :---: | :--- |
+| 全部走 API | 无 | 0 | 正常发布 |
+| 有序列走了 CSV 兜底 | `::warning::` 黄色 | 0 | 正常发布 |
+| 有序列两个通道全失败 | `::error::` 红色 | **1（整轮标红 ❌）** | 仍发布（降级版） |
+| `lsi_status.json` 不存在（模块整体崩溃） | `::error::` | **1** | — |
+| `lsi.asof` 跑到未来 | `::error::` | **1** | — |
+
+两个关键设计：
+- **这一步必须排在「发布看板 / 上传 artifacts」之后**，否则一标红就看不到当天那份降级看板了；
+- **`fetch_fred_lsi.py` 里 `lsi.json` 先落盘、最后才 `sys.exit(1)`**，保证有数据就先给看板用。
+  `daily_run.py` 里本模块是「失败仅降级不阻断」，所以 ETF 主报告、PNG、邮件都不受影响。
 
 ---
 
@@ -237,16 +291,20 @@ daily_run.py
 | 文件 | 说明 |
 | :--- | :--- |
 | `config.py` | **中央配置**：`TRACKS`（双宽基）、`RATIO_PAIRS`（三比价）、`FRED_SERIES`、`LSI_TH`（全部阈值）、A股配色 |
-| `common.py` | 公共工具：node / westock-data 定位、子进程取数、markdown 表格解析、中文字体探测、HTTP JSON、分位数、SMA |
+| `common.py` | 公共工具：node / westock-data 定位、子进程取数、markdown 表格解析、中文字体探测、HTTP JSON（含 `fred_csv` CSV 兜底通道）、分位数、SMA |
 | `fetch_data.py` | 双宽基取数（并发 8 线程） |
 | `fetch_ratios.py` | 三大比价取数 |
-| `fetch_fred_lsi.py` | FRED 取数 + LSI/GLI/报警/资金流向/四维诊断 |
+| `fetch_fred_lsi.py` | FRED 取数 + LSI/GLI/报警/资金流向/四维诊断，并写出 `lsi_status.json` 数据完整性报告 |
+| `check_lsi_status.py` | 读 `lsi_status.json` + `lsi.json` 决定本轮退出码（有空序列或 asof 跑到未来就标红） |
 | `analyze_report.py` | 双宽基诊断 |
 | `render.py` | matplotlib 四行布局 PNG |
 | `make_dashboard.py` | 自包含交互 HTML（无外部依赖，离线可看） |
 | `send_mail.py` | 汇总邮件（标题含三状态，正文五段，内嵌 PNG） |
 | `daily_run.py` | 编排入口 |
 | `westock-data/` | 腾讯自选股取数 CLI（Node，零第三方依赖，随仓库携带） |
+
+运行期产物（不提交进仓库）：`raw_data.json`、`ratios.json`、`summary.json`、`lsi.json`、
+`lsi_status.json`（数据完整性报告）、`etf_lsi_dashboard.html`、`etf_lsi_monitor_latest.png`。
 
 ### 监测图布局
 
@@ -430,7 +488,7 @@ python send_mail.py
 
 ## 九、防 Bug 铁律（改动代码前必读）
 
-以下 5 条均来自真实踩坑，严禁回退：
+以下 7 条均来自真实踩坑，严禁回退：
 
 1. **份额披露滞后识别 `_is_stale` 不捆绑 `nav`**
    基金公司每晚会先更新单位净值 `nav`，而份额 `shares` 存在 T+1~T+2 滞后。
@@ -448,6 +506,17 @@ python send_mail.py
 
 5. **占位符替换顺序**
    `make_dashboard.py` 已改为「全部动态内容由 JS 渲染」，从根本上消除了 `__HOLD__` 被 `__HOLD__2` 之类的子串覆盖问题。若日后改回占位符方案，必须先替换长名再替换短名。
+
+6. **`IORB` 必须留在 `FRED_SERIES` 里，但必须留在 `_CAL_EXCLUDE` 里**
+   它是 LSI 的核心项（`LSI = (SOFR − RRP) + (EFFR − IORB)`），删掉就整个公式缺一项；
+   同时它是政策利率、FRED 会预填未来日期且含周末行，一旦让它参与构造交易日历，
+   `lsi.asof` 就会被顶到明天（真实事故：A 股口径 `asof=2026-10-30`、宏观口径 `asof=2026-11-02`）。
+   **两个位置的要求正好相反，改代码时不要只看到一处就动手。**
+
+7. **`http_json` 的 CSV 兜底不能删**
+   调用 FRED 时必须写成 `common.http_json(url, csv_id=<序列号>, observation_start=start)`。
+   只传 url 就等于放弃了第二条通道——JSON API 偶发 500 且重试 3 次不保证命中，
+   失败一次就是整条曲线变 null，而且退出码仍是 0，很容易被当成「今天没数据」放过。
 
 另外两条工程经验：
 - **`.bat` 文件在中文 Windows 必须用 GBK 编码保存**，UTF-8 会被 `cmd.exe` 按 GBK 解析出错。
@@ -510,6 +579,19 @@ python send_mail.py
 
 **Q9：FRED_API_KEY 会不会泄露？**
 仓库**不含任何密钥**。请务必在 Secrets 里配置自己的 `FRED_API_KEY`（免费申请：https://fredaccount.stlouisfed.org/apikeys ）。FRED 与 GitHub 的自动扫描器会作废公开仓库里出现的密钥，所以本仓库从设计上就**不内置任何 key**。
+
+**Q10：某天看板里 GLI / RRP / 美元指数整条变 null，是数据没了吗？**
+不是数据没了，是那一轮 `api.stlouisfed.org` 偶发 HTTP 500 连续 3 次没命中（见 4.3 节）。
+现在已经有两道保险：① JSON 失败自动改走 `fredgraph.csv` 免密钥通道；
+② `check_lsi_status.py` 会在两个通道都失败时把整轮标红 ❌ 并打 `::error::` 注解。
+如果看到红色，去 run 页面 Annotations 里能看到具体是哪几个序列；
+手动验证某个序列到底有没有数据，直接开
+`https://fred.stlouisfed.org/graph/fredgraph.csv?id=<序列号>` 就能看到全量历史。
+
+**Q11：`lsi.asof` 显示的是明天（或周末）？**
+已修。根因是 `IORB` 会被 FRED 预填到未来日期、且含周末行，之前它参与了交易日历构造。
+现在 `IORB` 从日历构造里排除（数值照常参与 LSI 计算），`build_calendar()` 另有「不晚于今天」的兜底裁剪，
+`check_lsi_status.py` 还会在 `asof` 晚于今天时直接把整轮标红，防止再次悄悄回归。
 
 ---
 

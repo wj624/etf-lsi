@@ -19,6 +19,7 @@ import common
 from config import FRED_API_KEY, FRED_SERIES, LSI_TH
 
 OUT = os.path.join(common.BASE, 'lsi.json')
+STATUS_OUT = os.path.join(common.BASE, 'lsi_status.json')
 FRED_BASE = 'https://api.stlouisfed.org/fred/series/observations'
 
 # 抓取窗口（自然日）：需覆盖 500 日 RRP 峰值 + 250 日分位 + CPI 12 个月同比
@@ -29,13 +30,25 @@ CAL_DAYS = int(os.environ.get('LSI_CAL_DAYS', '820'))
 _DAILY = ['SOFR', 'RRPONTSYAWARD', 'EFFR', 'IORB', 'DGS2', 'DGS10',
           'T10YIE', 'DFII10', 'BAMLH0A0HYM2', 'RRPONTSYD']
 
+# 不参与日历构造的日频序列（只影响「日历有哪些天」，不影响取数，值照样进 LSI 计算）：
+#   IORB（准备金余额利率）是政策利率，FRED 会对**未来日期**预填同一个值——
+#   实测 2026-11-01（周日）就已经拿到 2026-11-02 的 3.90，且序列里含周末行。
+#   把它并进交易日历，会把周末和「明天」凭空塞进日历，lsi.asof 就被顶到未来
+#   （线上曾出现 A 股口径 asof=2026-10-30、宏观口径 asof=2026-11-02 打架）。
+#   它仍然是 LSI 的核心项：compute() 里 iorb = ffill(cal, raw['IORB'])，不受影响。
+_CAL_EXCLUDE = {'IORB'}
 
-def fetch_series(sid):
-    """拉取单个 FRED 序列 -> {date: float}（已剔除缺失值 '.'）"""
+
+def fetch_series(sid, on_csv=None):
+    """拉取单个 FRED 序列 -> {date: float}（已剔除缺失值 '.'）
+
+    JSON API 重试到底仍失败时，common.http_json 会自动回退 fredgraph.csv，
+    并把 on_csv 回调一次，用于统计兜底次数。
+    """
     start = (datetime.date.today() - datetime.timedelta(days=FETCH_DAYS)).isoformat()
     url = '%s?series_id=%s&api_key=%s&file_type=json&observation_start=%s' % (
         FRED_BASE, sid, FRED_API_KEY, start)
-    d = common.http_json(url)
+    d = common.http_json(url, csv_id=sid, observation_start=start, on_csv=on_csv)
     out = {}
     for o in d.get('observations', []):
         v = o.get('value')
@@ -47,37 +60,56 @@ def fetch_series(sid):
             continue
     meta = FRED_SERIES.get(sid, {})
     print('  %-18s %-24s n=%-5d latest=%s' % (sid, meta.get('label', ''), len(out),
-                                              max(out) if out else '-'))
+                                              max(out) if out else '-'), flush=True)
     return out
 
 
 def gather():
-    """并发抓取 20 个 FRED 序列（串行约 3 分钟，并发约 40 秒）"""
+    """并发抓取 20 个 FRED 序列（串行约 3 分钟，并发约 40 秒）
+
+    返回 (raw, via)：via[sid] 记录该序列走的是 'api' / 'csv'（兜底）/ 'error'（彻底失败），
+    供本轮数据完整性报告使用。
+    """
     from concurrent.futures import ThreadPoolExecutor
-    raw = {}
+    raw, via = {}, {}
 
     def _one(sid):
+        box = {'via': 'api'}
+
+        def _mark_csv():
+            box['via'] = 'csv'
+
         try:
-            return sid, fetch_series(sid)
+            d = fetch_series(sid, on_csv=_mark_csv)
         except Exception as e:
-            print('  !! %s 抓取失败：%s' % (sid, e))
-            return sid, {}
+            print('  !! %s 抓取失败：%s' % (sid, e), flush=True)
+            d, box['via'] = {}, 'error'
+        via[sid] = box['via']
+        return sid, d
 
     with ThreadPoolExecutor(max_workers=6) as ex:
         for sid, d in ex.map(_one, list(FRED_SERIES)):
             raw[sid] = d
-    return raw
+    return raw, via
 
 
 def build_calendar(raw):
-    """交易日历 = 日频序列观测日期的并集，取最后 CAL_DAYS 个"""
+    """交易日历 = 日频序列观测日期的并集，取最后 CAL_DAYS 个。
+
+    两道过滤（都只影响日历，不影响取数）：
+      ① 跳过 _CAL_EXCLUDE 里的序列（政策利率，含未来预填与周末行）；
+      ② 兜底裁掉晚于今天(UTC)的日期——任何序列都不该贡献未来日期。
+    """
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     ds = set()
     for sid in _DAILY:
-        ds |= set(raw.get(sid, {}).keys())
+        if sid in _CAL_EXCLUDE:
+            continue
+        ds |= {d for d in raw.get(sid, {}) if d <= today}
     if not ds:
         raise RuntimeError('FRED 日频序列全部为空，无法构造交易日历。'
                            '常见原因：① FRED_API_KEY 未配置或无效（注意 Actions 未配置 Secret 时会注入空字符串）；'
-                           '② 运行环境无法访问 api.stlouisfed.org。')
+                           '② 运行环境无法访问 api.stlouisfed.org 与 fred.stlouisfed.org。')
     ds = sorted(ds)
     return ds[-CAL_DAYS:]
 
@@ -733,9 +765,54 @@ def macro_state(v):
     return '✅ 风平浪静', 'ok'
 
 
+def _gh_annot(level, msg):
+    """在 GitHub Actions 里打注解（会显示在 run 页面的 Annotations 区块）。
+    本地控制台不加 ::warning:: 这种噪音。"""
+    if os.environ.get('GITHUB_ACTIONS') == 'true':
+        print('::%s::%s' % (level, msg), flush=True)
+
+
+def _report_completeness(via):
+    """本轮数据完整性报告：写 lsi_status.json + 打 Actions 注解，返回空序列个数。
+
+    为什么要有这一步：以前序列抓空只体现在 print 的 n=0 上，退出码仍是 0，
+    Action 一路绿 ✅，但看板里 GLI / RRP / DXY 已经整条变 null，没人发现。
+    """
+    _ALL = FRED_SERIES
+    csv_ids = [s for s in _ALL if via.get(s) == 'csv']
+    err_ids = [s for s in _ALL if via.get(s) == 'error']
+    st = {
+        'total': len(_ALL),
+        'api_ok': sum(1 for s in _ALL if via.get(s) == 'api'),
+        'csv_fallback': csv_ids,
+        'empty': err_ids,
+        'checked_at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M UTC'),
+    }
+    st['ok'] = st['api_ok'] + len(csv_ids)
+    try:
+        with open(STATUS_OUT, 'w', encoding='utf-8') as fp:
+            json.dump(st, fp, ensure_ascii=False, indent=1)
+    except Exception as e:
+        print('  !! 写 %s 失败：%s' % (STATUS_OUT, e))
+
+    print('-' * 62)
+    print('数据完整性：%d/%d 个序列拿到数据（API %d / CSV 兜底 %d / 空 %d）'
+          % (st['ok'], st['total'], st['api_ok'], len(csv_ids), len(err_ids)))
+    if csv_ids:
+        print('  CSV 兜底救回：%s' % '、'.join(csv_ids))
+        _gh_annot('warning', 'FRED JSON 接口本轮失败、已用 fredgraph.csv 兜底（%d 个）：%s'
+                  % (len(csv_ids), '、'.join(csv_ids)))
+    if err_ids:
+        print('  !! 两个通道都失败：%s' % '、'.join(err_ids))
+        _gh_annot('error', '本轮有 %d 个 FRED 序列两个通道都没拿到数据，相关指标会是 null：%s'
+                  % (len(err_ids), '、'.join(err_ids)))
+    return len(err_ids)
+
+
 def main():
     print('=' * 20, '模块三：FRED 宏观流动性压力指数 (LSI)', '=' * 20)
-    raw = gather()
+    raw, via = gather()
+    n_empty = _report_completeness(via)
     cal = build_calendar(raw)
     print('交易日历：%d 个观测日（%s ~ %s）' % (len(cal), cal[0], cal[-1]))
     res = compute(cal, raw)
@@ -790,6 +867,14 @@ def main():
     print('LSI = %s bps｜GLI = %s T｜RRP = %s T (%s%%)｜信用利差 = %s bps'
           % (safe(v['lsi']), safe(v['gli'], 3), safe(v['rrp_T'], 4), safe(v['rrp_pct'], 1), safe(v['credit'])))
     print('已写入 %s' % OUT)
+
+    # lsi.json 已经落盘（看板先用这份数据渲染），最后才用退出码表态：
+    # 有序列彻底抓空 -> 非 0，让上游明确知道这一轮宏观数据不完整，而不是静默绿灯。
+    # daily_run.py 里本模块是「失败仅降级不阻断」，所以不会影响 ETF 主报告与邮件；
+    # workflow 末尾的完整性检查步骤会据此把整轮标红。
+    if n_empty:
+        print('!! 有 %d 个序列为空，本轮宏观数据不完整（lsi.json 已按现有数据写出）' % n_empty)
+        sys.exit(1)
 
 
 if __name__ == '__main__':

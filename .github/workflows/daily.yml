@@ -107,6 +107,7 @@ jobs:
             summary.json
             ratios.json
             lsi.json
+            lsi_status.json
           if-no-files-found: ignore
 
       # 把看板发布到本仓库的 gh-pages 分支（GitHub Pages 原生托管）。
@@ -134,3 +135,12 @@ jobs:
           git commit -q -m "chore: update dashboard $(date -u '+%Y-%m-%d %H:%M UTC')"
           git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" HEAD:gh-pages
           echo "已发布到 https://wj624.github.io/etf-lsi/"
+
+      # 数据完整性把关：必须放在「发布看板 / 上传 artifacts」之后，
+      # 这样当天仍能拿到那份（降级的）看板，最后才用退出码给整轮定性。
+      # 以前 FRED 序列抓空只体现在日志里的 n=0、退出码仍是 0，Action 一路绿 ✅，
+      # 但看板里 GLI / RRP / DXY 已经整条变 null，没人发现。
+      # 判据来自 fetch_fred_lsi.py 每轮写出的 lsi_status.json（含 CSV 兜底与空序列清单）。
+      - name: Check LSI data completeness
+        if: always()
+        run: python check_lsi_status.py
