@@ -201,15 +201,25 @@ def fetch_sse(date_compact):
     """
     if _BREAKER.tripped:
         raise RuntimeError('接口熔断中，本轮跳过')
+    err1 = None
     try:
         out = _sse_via_akshare(date_compact)
         _BREAKER.ok()
         return out
     except Exception as e1:
+        # 注意：except 子句里的 e1 出了块就会被释放，必须先另存一份给下面拼接报错用
+        err1 = e1
         print('  ~ sse %s akshare 通道失败（%s），改直连' % (date_compact, str(e1)[:80]), flush=True)
-    out = _sse_via_http(date_compact)
-    _BREAKER.ok()
-    return out
+    try:
+        out = _sse_via_http(date_compact)
+        _BREAKER.ok()
+        return out
+    except Exception as e2:
+        # 两条通道都挂才算真失败，记一笔给熔断器
+        # （2026-11-01 云端实测：runner 出口 IP 被限流时会连续 JSONDecodeError，
+        #   akshare 与直连是同一个 query.sse.com.cn，所以两条会同时挂）
+        _BREAKER.bad()
+        raise RuntimeError('%s｜直连也失败: %s' % (err1, e2))
 
 
 def fetch_szse(start_compact, end_compact):
@@ -350,35 +360,60 @@ def main():
             print('深交所: %d 天（分 %d 段）'
                   % (len(got), (len(todo) + SZSE_CHUNK - 1) // SZSE_CHUNK), flush=True)
 
-        # ---- 上交所：逐日（第 1 轮并发 + 第 2 轮失败项串行补抓）----
+        # ---- 上交所：逐日（开工探测 + 第 1 轮并发 + 第 2 轮失败项串行补抓）----
         if SH_CODES:
             todo_c = [d.replace('-', '') for d in todo][-MAX_SSE_CALLS:]
             t0 = time.time()
-            got, failed = _sse_run(todo_c, cache, SSE_WORKERS)
-            print('上交所: 第 1 轮 %d/%d 天成功，失败 %d，耗时 %.0fs'
-                  % (got, len(todo_c), len(failed), time.time() - t0), flush=True)
 
-            # 第 2 轮：只补失败的那几天，**单线程串行** + 拉长间隔。
-            # 为什么降并发：上交所接口对同 IP 的并发很敏感，4 个线程同时失败大概率是被限流了；
-            # 再用 4 个线程重试只会继续撞墙，串行 + 1.5s 间隔才是能恢复的姿势。
-            if failed and not _BREAKER.tripped:
-                print('  第 2 轮：串行补抓 %d 天（间隔 %.1fs）...' % (len(failed), SSE_PASS2_GAP), flush=True)
-                ok2, still = _sse_run(failed, cache, 1, gap=SSE_PASS2_GAP)
-                print('  第 2 轮：救回 %d 天，仍失败 %d 天（累计 %.0fs）'
-                      % (ok2, len(still), time.time() - t0), flush=True)
-                got += ok2
-                failed = still
+            # 开工前先探最近一个交易日：github runner 的出口 IP 会被 query.sse.com.cn 限流
+            # （实测 2026-11-01：本机 248/248 全过，runner 10/10 全挂，报错是
+            #  JSONDecodeError: line 1 column 1 —— 服务端直接回了空/HTML，不是超时）。
+            # 整段不可用时每个日期都要烧 3 次 akshare 重试 + 3 次直连重试 ≈ 12s，
+            # 248 天就是 8 分钟纯白等。先花一次请求探一下，不可用就直接跳过整段。
+            probe = todo_c[-1]
+            try:
+                pm = fetch_sse(probe)
+                if pm:
+                    cache['shares'].setdefault(_compact2dash(probe), {}).update(pm)
+                probed = True
+            except Exception as e:
+                probed = False
+                print('  !! 开工探测失败（%s）' % str(e)[:120], flush=True)
 
-            sse_fail += len(failed)
-            sse_failed_dates = [_compact2dash(x) for x in failed]
-            if failed:
-                print('  !! 仍失败 %d 天：%s%s'
-                      % (len(failed), ' '.join(sse_failed_dates[:10]),
-                         ' ...' if len(failed) > 10 else ''), flush=True)
-                print('  !! 这些日期本轮回退到 westock 旧值（不会用前一天份额冒充）；'
-                      '下一轮会自动重新补抓（尾部 %d 天强制刷新 + 窗口内缺失全部重抓）' % TAIL, flush=True)
-                _gh_annot('warning', '上交所份额有 %d 天两轮抓取均失败（已回退 westock 旧值）：%s'
-                          % (len(failed), '、'.join(sse_failed_dates[:10])))
+            if not probed:
+                print('上交所: 接口当前不可用，本轮整体跳过 %d 天（保留已有缓存，下轮自动补抓）'
+                      % len(todo_c), flush=True)
+                _gh_annot('warning', '上交所份额接口本轮不可用，%d 天未刷新（沿用仓库里的缓存份额）'
+                          % len(todo_c))
+                sse_failed_dates = [_compact2dash(x) for x in todo_c]
+                sse_fail += len(todo_c)
+            else:
+                got, failed = _sse_run(todo_c[:-1], cache, SSE_WORKERS)
+                print('上交所: 第 1 轮 %d/%d 天成功，失败 %d，耗时 %.0fs'
+                      % (got, len(todo_c) - 1, len(failed), time.time() - t0), flush=True)
+
+                # 第 2 轮：只补失败的那几天，**单线程串行** + 拉长间隔。
+                # 为什么降并发：上交所接口对同 IP 的并发很敏感，4 个线程同时失败大概率是被限流了；
+                # 再用 4 个线程重试只会继续撞墙，串行 + 1.5s 间隔才是能恢复的姿势。
+                if failed and not _BREAKER.tripped:
+                    print('  第 2 轮：串行补抓 %d 天（间隔 %.1fs）...' % (len(failed), SSE_PASS2_GAP), flush=True)
+                    ok2, still = _sse_run(failed, cache, 1, gap=SSE_PASS2_GAP)
+                    print('  第 2 轮：救回 %d 天，仍失败 %d 天（累计 %.0fs）'
+                          % (ok2, len(still), time.time() - t0), flush=True)
+                    got += ok2
+                    failed = still
+
+                sse_fail += len(failed)
+                sse_failed_dates = [_compact2dash(x) for x in failed]
+                if failed:
+                    print('  !! 仍失败 %d 天：%s%s'
+                          % (len(failed), ' '.join(sse_failed_dates[:10]),
+                             ' ...' if len(failed) > 10 else ''), flush=True)
+                    print('  !! 这些日期沿用 _exchange_shares.json 里已有的份额（不会用前一天冒充）；'
+                          '完全没有缓存的日期才由 fetch_data.py 回退 westock 旧值。'
+                          '下一轮会自动重新补抓（尾部 %d 天强制刷新 + 窗口内缺失全部重抓）' % TAIL, flush=True)
+                    _gh_annot('warning', '上交所份额有 %d 天两轮抓取均失败（沿用缓存份额）：%s'
+                              % (len(failed), '、'.join(sse_failed_dates[:10])))
 
     # ---- 净值：全历史，便宜，每次都刷 ----
     nav = fetch_nav(codes)
