@@ -32,11 +32,18 @@ W_M, W_Q, W_Y = 4, 12, 52
 
 def get_series(code, fq=None):
     """周K全周期：按 4 年一段拼接"""
-    segs, out = [], {}
+    segs, out, empty = [], {}, []
     y = SEG_FROM
+    today = datetime.date.today().isoformat()
     this_year = datetime.date.today().year
     while y <= this_year:
         s, e = '%d-01-01' % y, '%d-12-31' % (y + SEG_YEARS - 1)
+        # 最后一段天然跨到未来（2026-01-01 ~ 2029-12-31）。传未来日期这一段偶发整段返回空，
+        # 2026-11-03 06:49 那次就是这样把 2026 全年丢掉的：序列停在 2025-12-31，
+        # 比值拿去年的值当“当前值”，分位从 52% 掉到 16.5%，结论从“均衡”变成“红利低波性价比更高”。
+        # 截到今天只影响最后一段，前面几段 end 都早于今天，行为不变。
+        if e > today:
+            e = today
         args = ['kline', code, '--period', PERIOD, '--start', s, '--end', e, '--limit', '500']
         if fq:
             args += ['--fq', fq]
@@ -44,14 +51,19 @@ def get_series(code, fq=None):
         if not rows:
             time.sleep(1.2)
             rows = common.parse_kline(common.run(args, retry=4, timeout=240))
+        if not rows:
+            empty.append((s, e))
+            print('  !! %s 段 %s~%s 抓空（两次各 4 次重试均无数据）' % (code, s, e), flush=True)
         segs.append((s, e, len(rows)))
         for d, c in rows:
             out[d] = c
         y += SEG_YEARS
-    print('  %-10s %s  %d 根  %s ~ %s   分段:%s' %
+    print('  %-10s %s  %d 根  %s ~ %s   分段:%s%s' %
           (code, PERIOD, len(out), min(out) if out else '-', max(out) if out else '-',
-           ' '.join('%s:%d' % (a[:4], n) for a, _, n in segs)))
-    return out
+           ' '.join('%s:%d' % (a[:4], n) for a, _, n in segs),
+           ('   空段:%s' % '、'.join('%s~%s' % x for x in empty)) if empty else ''),
+          flush=True)
+    return out, empty
 
 
 def diagnose(pct):
@@ -160,11 +172,57 @@ def main():
         for c, f, _ in (p['num'], p['den']):
             if (c, f) not in codes:
                 codes.append((c, f))
-    series = {}
+    series, empty_segs = {}, {}
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=4) as ex:
-        for (c, f), s in zip(codes, ex.map(lambda x: get_series(x[0], x[1]), codes)):
+        for (c, f), (s, emp) in zip(codes, ex.map(lambda x: get_series(x[0], x[1]), codes)):
             series[c] = s
+            if emp:
+                empty_segs[c] = emp
+    if empty_segs:
+        for c, emp in empty_segs.items():
+            # 空段不等于缺失：科创50 指数 2019-12 才发布、十年国债ETF 2017-08 才上市，
+            # 它们 2010~2017 的段本来就该是空的。只有“该标的已经有数据、却在这一段空掉”
+            # 才是真的漏抓，那种才会让比值停在旧日期。
+            d0 = min(series[c]) if series.get(c) else None
+            real = [('%s~%s' % x) for x in emp if not d0 or x[1] >= d0]
+            benign = len(emp) - len(real)
+            if benign:
+                print('  %s 有 %d 个空段在其首个数据日（%s）之前，属上市/发布前正常无数据' %
+                      (c, benign, d0 or '-'))
+            if real:
+                print('!! %s 有分段抓空：%s（该标的序列不完整，相关比值可能停在旧日期）' %
+                      (c, '、'.join(real)))
+
+    # 数据新鲜度：某个标的最后一根周K明显落后于同批其他标的 → 说明它某段没抓到，
+    # 比值会拿去年甚至前年的值当“当前值”，分位和结论都会错。周K本身落后 7~10 个自然日
+    # 是正常的（周末 + 长假），所以用 14 天作阈值，只抓“漏了整段”这种量级的落后。
+    lasts = {c: max(s) for c, s in series.items() if s}
+    today = datetime.date.today().isoformat()
+    lag_abs, stale = 0, set()
+    if lasts:
+        newest = max(lasts.values())
+        for c, d in sorted(lasts.items()):
+            try:
+                lag = (datetime.datetime.strptime(newest, '%Y-%m-%d') -
+                       datetime.datetime.strptime(d, '%Y-%m-%d')).days
+            except Exception:
+                continue
+            if lag > 14:
+                stale.add(c)
+                print('!! %s 最新数据停在 %s，比本批最新的 %s 落后 %d 天（疑似整段抓空，'
+                      '相关分位不可信）' % (c, d, newest, lag))
+        # 横向比对有个盲区：四个标的要是“一起”空掉最后一段，谁都不比别人落后，
+        # 上面那条一句话都不会说 —— 06:49 那次就接近这种情况。所以再对绝对日期比一次。
+        try:
+            lag_abs = (datetime.datetime.strptime(today, '%Y-%m-%d') -
+                       datetime.datetime.strptime(newest, '%Y-%m-%d')).days
+        except Exception:
+            lag_abs = 0
+        if lag_abs > 14:
+            print('!! 全部标的的最新数据都停在 %s，距今 %d 天。周K正常最多落后 10 天'
+                  '（周末+长假），这么长基本可以确定最后一段整段抓空，'
+                  '下面三行“当前值”其实是旧值，别采信。' % (newest, lag_abs))
 
     # 数据完整性：周K相邻间隔正常 7 天，超过 60 天视为缺段
     for c, s in series.items():
@@ -181,17 +239,45 @@ def main():
         if gaps:
             print('!! %s 序列存在缺口：%s' % (c, '，'.join(gaps[:5])))
 
+    # 上一份结果：某个比值对这次不可信时，直接沿用它的旧值而不是整份丢掉
+    prev = {}
+    try:
+        if os.path.exists(OUT):
+            with open(OUT, encoding='utf-8') as fp:
+                prev = json.load(fp).get('items') or {}
+    except Exception:
+        prev = {}
+
     out = {'asof': None, 'period': PERIOD, 'items': {}, 'order': [p['key'] for p in RATIO_PAIRS]}
     for p in RATIO_PAIRS:
+        # 一个比值只由两个标的决定，所以“哪个标的陈旧”能精确到“哪一对不可信”。
+        # 06:49 那次正是部分标的空掉（399006、510300 为 2026:0），全局检查看不出来。
+        pcs = [p['num'][0], p['den'][0]]
+        bad = [c for c in pcs if c in stale]
+        if bad:
+            print('!! %s 暂不更新：%s 数据陈旧，沿用上一份结果' % (p['title'], '、'.join(bad)))
+            if p['key'] in prev:
+                out['items'][p['key']] = prev[p['key']]
+            continue
         it = build(p, series)
         if it:
             out['items'][p['key']] = it
-            out['asof'] = it['asof']
-            print('%s：当前 %.4f　近%s年分位 %.1f%%（%s）　%s' %
-                  (p['title'], it['cur'], it['years'], it['pct'], it['word'], it['label']))
+            print('%s：当前 %.4f　近%s年分位 %.1f%%（%s）　%s　[数据截至 %s]' %
+                  (p['title'], it['cur'], it['years'], it['pct'], it['word'], it['label'],
+                   it['asof']))
     if not out['items']:
         print('!! 未生成任何比值数据')
         sys.exit(1)
+    out['asof'] = max(v['asof'] for v in out['items'].values())
+
+    # 数据明显陈旧就别覆盖 ratios.json。workflow 会缓存这个文件，不写就等于沿用上一份
+    # 算对了的数据；写下去则等于把“去年 12 月 31 日”当成“今天”，看板上会静悄悄地错。
+    # 宁可 ④ 面板停在昨天的正确数字，也不要它给出今天的错误结论。
+    if lag_abs > 14:
+        print('!! 拒绝写入 %s：最新数据停在 %s（距今 %d 天），沿用上一份结果' %
+              (OUT, max(lasts.values()) if lasts else '-', lag_abs))
+        sys.exit(1)
+
     with open(OUT, 'w', encoding='utf-8') as fp:
         json.dump(out, fp, ensure_ascii=False)
     print('已写入 %s（%.1fs）' % (OUT, time.time() - t0))
