@@ -10,9 +10,15 @@
 
 ## 📱 手机端访问地址（添加到主屏幕）
 
-> **https://wj624.github.io/etf-lsi/**
+| 线路 | 地址 | 说明 |
+| :--- | :--- | :--- |
+| **主地址** | **https://etf-lsi.pages.dev/** | Cloudflare 全球节点，国内多数网络可直连 |
+| **备用地址** | **https://wj624.github.io/etf-lsi/** | GitHub Pages 原生托管 |
 
-手机微信 / Safari / Chrome 直接打开上面这个网址，然后：
+> 两个地址是**同一份看板**，每天流水线跑完会同时更新，内容完全一致。
+> 国内打不开 `github.io` 时请用主地址；图标与添加到主屏幕后的体验也完全一样。
+
+手机微信 / Safari / Chrome 直接打开上面任一网址，然后：
 
 | 系统 | 操作 |
 | :--- | :--- |
@@ -26,12 +32,13 @@
 ### 它是怎么工作的
 
 ```
-每天北京时间 19:00
+每天北京时间 21:17
    GitHub Actions 跑流水线 → 生成看板 HTML
         ↓ 自动推送
-   本仓库的 `gh-pages` 分支（GitHub Pages 自动发布，不含任何密钥）
-        ↓ GitHub Pages 自动发布
-   https://wj624.github.io/etf-lsi/
+    本仓库的 `gh-pages` 分支（GitHub Pages 自动发布，不含任何密钥）
+        ↓ 同一次运行里并行发布到两个地方（同一份产物）
+   ├── https://wj624.github.io/etf-lsi/     GitHub Pages 原生托管
+   └── https://etf-lsi.pages.dev/           Cloudflare Pages（国内更稳）
 ```
 
 **⚠️ 关于「每次打开是重新跑，还是读缓存」——答案是：读快照，不重新跑。**
