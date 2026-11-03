@@ -136,6 +136,25 @@ jobs:
           git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" HEAD:gh-pages
           echo "已发布到 https://wj624.github.io/etf-lsi/"
 
+      # 同步发布到 Cloudflare Pages：国内可达性明显优于 github.io。
+      # 采用 Direct Upload（不走 CF 的 Git 集成），--branch 必须与项目生产分支 gh-pages 一致，
+      # 否则会落到预览域名上、生产域名不更新。
+      - name: Publish to Cloudflare Pages
+        if: success()
+        env:
+          CLOUDFLARE_API_TOKEN:  ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -e
+          if [ ! -f public/index.html ]; then
+            echo "!! 未生成看板，跳过 Cloudflare 发布"; exit 0
+          fi
+          npx --yes wrangler@4 pages deploy public \
+            --project-name=etf-lsi \
+            --branch=gh-pages \
+            --commit-dirty=true
+          echo "已同步到 https://etf-lsi.pages.dev/"
+
       # 数据完整性把关：必须放在「发布看板 / 上传 artifacts」之后，
       # 这样当天仍能拿到那份（降级的）看板，最后才用退出码给整轮定性。
       # 以前 FRED 序列抓空只体现在日志里的 n=0、退出码仍是 0，Action 一路绿 ✅，
