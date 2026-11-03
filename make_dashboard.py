@@ -593,8 +593,9 @@ function drawLsi(){
     let thr='';
     for(const t of [50,20,-30]){
       const y=yL(t), col = t===50?'#8B1A1A':(t===20?'#E8453C':'#1FB37A');
+      /* 阈值标注放在图内左侧：右上方是 GLI 轴刻度，写在外面会和刻度数字叠在一起 */
       thr+='<line x1="'+Lf+'" y1="'+y+'" x2="'+(W-R)+'" y2="'+y+'" stroke="'+col+'" stroke-width="1" stroke-dasharray="5 4" opacity="0.8"/>'+
-        '<text x="'+(W-R+6)+'" y="'+(y+4)+'" fill="'+col+'" font-size="10" font-family="Consolas">'+(t>0?'+':'')+t+'</text>';
+        '<text x="'+(Lf+5)+'" y="'+(y-4)+'" fill="'+col+'" font-size="10" font-family="Consolas">'+(t>0?'+':'')+t+'</text>';
     }
     let axis='';
     for(let k=0;k<=4;k++){const f=k/4, y=Tp+10+f*(H-B-8-Tp-10);
