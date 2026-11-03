@@ -14,6 +14,7 @@
 | :--- | :--- | :--- |
 | **主地址** | **https://etf-lsi.pages.dev/** | Cloudflare 全球节点，国内多数网络可直连 |
 | **备用地址** | **https://wj624.github.io/etf-lsi/** | GitHub Pages 原生托管 |
+| **看板中心（聚合入口）** | **https://wj-dashboards.pages.dev/** | 一个页面切四个看板，含本看板 |
 
 > 两个地址是**同一份看板**，每天流水线跑完会同时更新，内容完全一致。
 > 国内打不开 `github.io` 时请用主地址；图标与添加到主屏幕后的体验也完全一样。
