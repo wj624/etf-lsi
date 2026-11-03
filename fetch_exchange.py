@@ -420,6 +420,18 @@ def main():
     for c, m in nav.items():
         cache['nav'].setdefault(c, {}).update(m)
 
+    # ---- 滚动裁剪：份额缓存只保留最近 KEEP_DAYS 个交易日 ----
+    # 交易所源在这里的角色是「给最近一段时间做 T+0 精确覆盖」，更早的历史由 westock 兜着。
+    # 不裁剪的话这个文件会一年年变大（也是唯一会被提交回仓库的大文件），
+    # 裁到窗口大小后体积恒定，github 上不会累积垃圾。
+    KEEP_DAYS = WINDOW_DAYS + TAIL
+    if len(cache['shares']) > KEEP_DAYS:
+        drop = sorted(cache['shares'])[:-KEEP_DAYS]
+        for d in drop:
+            cache['shares'].pop(d, None)
+        print('  份额缓存滚动裁剪：丢弃 %d 天窗口外旧数据，保留 %d 天（%s ~ %s）'
+              % (len(drop), len(cache['shares']), min(cache['shares']), max(cache['shares'])))
+
     cache['meta'] = {
         'updated': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'window_days': WINDOW_DAYS,

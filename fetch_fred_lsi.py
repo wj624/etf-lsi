@@ -23,8 +23,11 @@ STATUS_OUT = os.path.join(common.BASE, 'lsi_status.json')
 FRED_BASE = 'https://api.stlouisfed.org/fred/series/observations'
 
 # 抓取窗口（自然日）：需覆盖 500 日 RRP 峰值 + 250 日分位 + CPI 12 个月同比
-FETCH_DAYS = int(os.environ.get('LSI_FETCH_DAYS', '1560'))
-CAL_DAYS = int(os.environ.get('LSI_CAL_DAYS', '820'))
+# 展示窗口 820 -> 1300 个交易日(≈5 年)。抓取窗口加长到 2700 天：减去 1300 天后还剩约 550 个
+# 交易日用于预热 500 日 RRP 峰值 / 250 日分位 / 20 日动量，曲线左端一开口就是有效值而不是 null。
+# 每个 FRED 序列仍只有一次请求，只是返回行数变多，运行时间基本不变。
+FETCH_DAYS = int(os.environ.get('LSI_FETCH_DAYS', '2700'))
+CAL_DAYS = int(os.environ.get('LSI_CAL_DAYS', '1300'))
 
 # 参与构造交易日历的日频序列
 _DAILY = ['SOFR', 'RRPONTSYAWARD', 'EFFR', 'IORB', 'DGS2', 'DGS10',
@@ -111,7 +114,21 @@ def build_calendar(raw):
                            '常见原因：① FRED_API_KEY 未配置或无效（注意 Actions 未配置 Secret 时会注入空字符串）；'
                            '② 运行环境无法访问 api.stlouisfed.org 与 fred.stlouisfed.org。')
     ds = sorted(ds)
-    return ds[-CAL_DAYS:]
+    # 这里返回「全量」日历：500 日峰值 / 250 日分位 / 动量类指标需要前面有历史才有效，
+    # 先按全量算完，再在 main() 里把 hist 各序列截到最近 CAL_DAYS 个点（见 _slice_tail）。
+    return ds
+
+
+def _slice_tail(res, k):
+    """把 compute() 的结果截到最近 k 个观测日；latest 不动（它取的是最后一个点）。"""
+    cal = res.get('cal') or []
+    if not k or k <= 0 or len(cal) <= k:
+        return res
+    s0 = len(cal) - k
+    res['cal'] = cal[s0:]
+    res['hist'] = {kk: (vv[s0:] if isinstance(vv, list) else vv)
+                   for kk, vv in (res.get('hist') or {}).items()}
+    return res
 
 
 def ffill(cal, mapping):
@@ -814,8 +831,10 @@ def main():
     raw, via = gather()
     n_empty = _report_completeness(via)
     cal = build_calendar(raw)
-    print('交易日历：%d 个观测日（%s ~ %s）' % (len(cal), cal[0], cal[-1]))
-    res = compute(cal, raw)
+    print('交易日历：%d 个观测日（%s ~ %s），其中展示最近 %d 个'
+          % (len(cal), cal[0], cal[-1], min(CAL_DAYS, len(cal))))
+    res = _slice_tail(compute(cal, raw), CAL_DAYS)
+    cal = res['cal']
     v = res['latest']
 
     # 供第 8 项显示「10 日前信用利差」

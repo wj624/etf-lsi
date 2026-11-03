@@ -181,6 +181,16 @@ td.raw,td.fm{font-family:"Microsoft YaHei",sans-serif;font-size:11.6px;color:var
 .foot{color:var(--sub);font-size:11.6px;margin-top:8px;line-height:1.85}
 .legend{display:flex;gap:18px;flex-wrap:wrap;font-size:12px;color:var(--sub);margin:2px 0 6px}
 .legend i{display:inline-block;width:20px;height:3px;border-radius:2px;vertical-align:middle;margin-right:6px}
+/* 缩放工具条（三张图共用） */
+.zbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:2px 0 8px}
+.zbtn{background:var(--panel2);border:1px solid var(--grid);color:var(--sub);font-size:11.5px;
+padding:3px 9px;border-radius:7px;cursor:pointer;user-select:none;font-family:inherit;line-height:1.6}
+.zbtn:hover{border-color:#4a5160;color:var(--txt)}
+.zbtn.on{background:#2A3140;border-color:#4a5160;color:#fff}
+.zhint{color:#6b7484;font-size:11px;margin-left:4px}
+.zrange{color:#6b7484;font-size:11px;margin-left:auto;font-family:Consolas,monospace}
+svg.zc{cursor:crosshair;touch-action:none}
+svg.zc.drag{cursor:grabbing}
 .reason{background:var(--panel);border:1px solid var(--grid);border-left:3px solid var(--blue);
 border-radius:10px;padding:12px 15px;margin-bottom:16px;font-size:13px}
 .rgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:14px}
@@ -238,10 +248,11 @@ border-radius:10px;padding:12px 15px;margin-bottom:10px;font-size:12.8px;line-he
 <div class="panel" id="lsiPanel" style="display:none">
   <h2>⑤ 宏观 LSI 核心面板（美联储流动性压力指数）</h2>
   <div class="hint" id="lsiHint"></div>
-  <h2 style="margin-top:8px">⑤-1 美元宏观流动性压力指数 LSI vs 美联储净流动性 GLI（悬停查看每日数值）</h2>
+  <h2 style="margin-top:8px">⑤-1 美元宏观流动性压力指数 LSI vs 美联储净流动性 GLI（悬停查看每日数值 · 可缩放查看近 5 年）</h2>
   <div class="legend"><span><i style="background:var(--orange)"></i>LSI 压力指数（左轴，bps）</span>
   <span><i style="background:var(--blue)"></i>GLI 净流动性（右轴，万亿美元 T）</span>
   <span><i style="background:#F5A623"></i>阈值线：+20 / +50 / −30 bps</span></div>
+  <div class="zbar" id="lsiZbar"></div>
   <svg id="lsiChart" viewBox="0 0 1000 360"></svg>
   <div class="tip" id="lsiTip"></div>
   <div class="cards" id="lsiCards"></div>
@@ -317,101 +328,195 @@ if (D.lsi) {
 }
 $('topCards').innerHTML = ch;
 
-/* ---------- 双宽基交互图 ---------- */
+/* ---------- 双宽基交互图（滚轮缩放 / 拖拽平移 / 区间按钮） ---------- */
+const ZMIN = 15;                                  /* 窗口最窄保留 15 个点 */
+const RANGES = [['1M',21],['3M',63],['6M',126],['1Y',250],['5Y',0]];
+
+function zRange(arr,i0,i1){                       /* 窗口内 min/max，跳过 null */
+  let m=Infinity,M=-Infinity;
+  for(let i=i0;i<=i1;i++){const v=arr[i];
+    if(v===null||v===undefined||isNaN(v))continue;
+    if(v<m)m=v; if(v>M)M=v;}
+  if(!isFinite(m)){m=0;M=1;}
+  if(M-m<1e-9)M=m+1;
+  return [m,M];
+}
+
+/* 通用缩放控制器：滚轮以光标位置为锚点缩放 / 按住拖拽平移 / 双击回到 1 年 */
+function attachZoom(el,view,N,render,padL,padR){
+  const pL=(padL===undefined?64:padL), pR=(padR===undefined?64:padR);
+  el.addEventListener('wheel',ev=>{
+    ev.preventDefault();
+    const n=view.i1-view.i0+1;
+    const rc=el.getBoundingClientRect();
+    const px=(ev.clientX-rc.left)/rc.width*1000;
+    const frac=Math.min(1,Math.max(0,(px-pL)/Math.max(1,(1000-pL-pR))));
+    const anchor=view.i0+frac*(n-1);
+    let nn=Math.round(n*(ev.deltaY>0?1.25:0.8));
+    nn=Math.max(Math.min(ZMIN,N),Math.min(N,nn));
+    const r=n>1?(anchor-view.i0)/(n-1):0.5;
+    let i0=Math.round(anchor-r*(nn-1)), i1=i0+nn-1;
+    if(i0<0){i0=0;i1=nn-1;}
+    if(i1>N-1){i1=N-1;i0=i1-nn+1;}
+    view.i0=Math.max(0,i0); view.i1=Math.min(N-1,i1); render();
+  },{passive:false});
+
+  let drag=null;
+  el.addEventListener('mousedown',ev=>{
+    drag={x:ev.clientX,i0:view.i0,i1:view.i1};
+    el.classList.add('drag'); ev.preventDefault();
+  });
+  window.addEventListener('mousemove',ev=>{
+    if(!drag)return;
+    const rc=el.getBoundingClientRect();
+    const per=(1000-pL-pR)/Math.max(1,(drag.i1-drag.i0));
+    const dn=Math.round((drag.x-ev.clientX)/rc.width*1000/per);
+    let a=drag.i0+dn, b=drag.i1+dn;
+    if(a<0){b-=a;a=0;}
+    if(b>N-1){a-=b-(N-1);b=N-1;}
+    view.i0=Math.max(0,a); view.i1=Math.min(N-1,b); render();
+  });
+  window.addEventListener('mouseup',()=>{ if(drag){drag=null; el.classList.remove('drag');} });
+  el.addEventListener('dblclick',()=>{ view.i1=N-1; view.i0=Math.max(0,N-250); render(); });
+}
+
 function drawTrack(key){
   const T = D.tracks[key];
   const S = T.summary, N = T.dates.length;
   const W=1000,H=380,L=64,R=64,Tp=14,B=30;
-  function scale(arr, lo, hi){ const m=Math.min.apply(null,arr), M=Math.max.apply(null,arr);
-    const a=(hi-lo)/((M-m)||1), b=lo-a*m; return arr.map(v=>a*v+b); }
-  const X = i => L + i*(W-L-R)/(N-1);
-  const YH = scale(T.hold, H-B-8, Tp+10), YI = scale(T.idx, H-B-8, Tp+10);
-  const path = (ys)=>ys.map((y,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+y.toFixed(1)).join('');
-  let g='';
-  for(let k=0;k<=4;k++){const y=Tp+10+k*(H-B-8-Tp-10)/4; g+='<line x1="'+L+'" y1="'+y+'" x2="'+(W-R)+'" y2="'+y+'" stroke="#2A2F39" stroke-width="1"/>';}
-  const lm=Math.min.apply(null,T.hold), lM=Math.max.apply(null,T.hold);
-  const rm=Math.min.apply(null,T.idx), rM=Math.max.apply(null,T.idx);
-  let axis='';
-  for(let k=0;k<=4;k++){const f=k/4, y=Tp+10+f*(H-B-8-Tp-10);
-    axis+='<text x="'+(L-8)+'" y="'+(y+4)+'" fill="#8A93A3" font-size="10.5" text-anchor="end" font-family="Consolas">'+(lM-f*(lM-lm)).toFixed(3)+'</text>';
-    axis+='<text x="'+(W-R+8)+'" y="'+(y+4)+'" fill="#8A93A3" font-size="10.5" font-family="Consolas">'+(rM-f*(rM-rm)).toFixed(0)+'</text>';}
-  let xt='';
-  const step=Math.max(1,Math.floor(N/12));
-  for(let i=0;i<N;i+=step){ xt+='<text x="'+X(i)+'" y="'+(H-8)+'" fill="#8A93A3" font-size="10.5" text-anchor="middle" font-family="Consolas">'+T.dates[i].slice(0,7)+'</text>';}
-  let sh='';
-  for(let i=1;i<N;i++){ if(Math.abs(T.spread[i])>=25)
-    sh+='<rect x="'+X(i-1)+'" y="'+Tp+'" width="'+(X(i)-X(i-1)+1)+'" height="'+(H-B-Tp)+'" fill="'+(T.spread[i]>0?'#E8453C':'#1FB37A')+'" opacity="0.07"/>';}
-  const svgHtml = g+sh+
-    '<line x1="'+L+'" y1="'+(H-B)+'" x2="'+(W-R)+'" y2="'+(H-B)+'" stroke="#2A2F39"/>'+
-    '<path d="'+path(YI)+'" fill="none" stroke="#9B6BFF" stroke-width="2" opacity=".95"/>'+
-    '<path d="'+path(YH)+'" fill="none" stroke="#FF8A1F" stroke-width="2.4"/>'+
-    axis+xt+
-    '<line class="cross" x1="0" y1="'+Tp+'" x2="0" y2="'+(H-B)+'" stroke="#8A93A3" stroke-width="1" stroke-dasharray="3 3" opacity="0"/>'+
-    '<circle class="dotH" r="4" fill="#FF8A1F" stroke="#181A20" stroke-width="1.5" opacity="0"/>'+
-    '<circle class="dotI" r="4" fill="#9B6BFF" stroke="#181A20" stroke-width="1.5" opacity="0"/>'+
-    '<rect x="'+L+'" y="'+Tp+'" width="'+(W-L-R)+'" height="'+(H-B-Tp)+'" fill="transparent" class="hit"/>';
-
-  /* Spread 副图 */
   const W2=1000,H2=170,L2=64,R2=64,T2=10,B2=26;
-  const X2 = i => L2 + i*(W2-L2-R2)/(N-1);
-  const mS=Math.min.apply(null,T.spread), MS=Math.max.apply(null,T.spread);
-  const lo=Math.min(mS,-25), hi=Math.max(MS,25);
-  const Y2 = v => T2 + (hi-v)/((hi-lo)||1)*(H2-B2-T2);
-  let bars='', gl='';
-  for(let k=0;k<=4;k++){const y=T2+k*(H2-B2-T2)/4; gl+='<line x1="'+L2+'" y1="'+y+'" x2="'+(W2-R2)+'" y2="'+y+'" stroke="#2A2F39" stroke-width="1"/>';}
-  const bw=Math.max(1,(W2-L2-R2)/N*0.7);
-  for(let i=0;i<N;i++){ const v=T.spread[i], y0=Y2(0), y1=Y2(v);
-    bars+='<rect x="'+(X2(i)-bw/2)+'" y="'+Math.min(y0,y1)+'" width="'+bw+'" height="'+Math.max(Math.abs(y1-y0),0.6)+'" fill="'+(v>=0?'#E8453C':'#1FB37A')+'" opacity="0.72"/>';}
-  let thr='';
-  for(const t of [25,-25]){ thr+='<line x1="'+L2+'" y1="'+Y2(t)+'" x2="'+(W2-R2)+'" y2="'+Y2(t)+'" stroke="#F5A623" stroke-width="1" stroke-dasharray="5 4" opacity="0.75"/>'
-    +'<text x="'+(W2-R2+6)+'" y="'+(Y2(t)+4)+'" fill="#F5A623" font-size="10" font-family="Consolas">'+(t>0?'+':'')+t+'</text>';}
-  let spAxis='';
-  for(let k=0;k<=4;k++){const f=k/4, y=T2+f*(H2-B2-T2);
-    spAxis+='<text x="'+(L2-8)+'" y="'+(y+4)+'" fill="#8A93A3" font-size="10.5" text-anchor="end" font-family="Consolas">'+(hi-f*(hi-lo)).toFixed(0)+'</text>';}
-  const zero = Y2(0);
-  const spHtml = gl+bars+'<line x1="'+L2+'" y1="'+zero+'" x2="'+(W2-R2)+'" y2="'+zero+'" stroke="#4a5160"/>'+thr+spAxis;
+  const view={i0:Math.max(0,N-250),i1:N-1};
 
   const blk = document.createElement('div');
   blk.className='panel';
+  let btns='';
+  for(const rg of RANGES) btns+='<button class="zbtn" data-len="'+rg[1]+'">'+rg[0]+'</button>';
+  btns+='<button class="zbtn" data-len="-1" title="回到最近一年">复位</button>';
   blk.innerHTML =
     '<h2>' + esc(S.title) + ' · ' + esc(S.labels.div_title) + '（悬停查看每日明细）</h2>' +
     '<div class="legend"><span><i style="background:var(--orange)"></i>' + esc(S.labels.hold) + '（左轴）</span>' +
     '<span><i style="background:var(--purple)"></i>' + S.index_name + ' 收盘价（右轴）</span></div>' +
-    '<svg viewBox="0 0 1000 380">' + svgHtml + '</svg>' +
+    '<div class="zbar">' + btns + '<span class="zhint">滚轮缩放 · 按住拖拽平移 · 双击复位</span>' +
+    '<span class="zrange"></span></div>' +
+    '<svg class="zc tracksvg" viewBox="0 0 1000 380"></svg>' +
     '<div class="tip"></div>' +
     '<h2 style="margin-top:10px">开口差值 Spread = 占比分位 − 指数分位</h2>' +
     '<div class="hint">红柱：橙线强于紫线（持仓相对抬升）　绿柱：紫线强于橙线（指数相对虚高）　橙虚线：±25 劈叉预警阈值</div>' +
-    '<svg viewBox="0 0 1000 170">' + spHtml + '</svg>' +
+    '<svg class="zc spsvg" viewBox="0 0 1000 170"></svg>' +
     '<div class="reason" style="margin:12px 0 0"><b>今日诊断（' + S.date + '）：</b>' + esc(S.reason) + '</div>';
   $('trackBlocks').appendChild(blk);
 
-  const svgEl = blk.querySelector('svg');
-  const hit = svgEl.querySelector('.hit'), tip = blk.querySelector('.tip');
-  const cross = svgEl.querySelector('.cross'), dotH = svgEl.querySelector('.dotH'), dotI = svgEl.querySelector('.dotI');
-  hit.addEventListener('mousemove', ev=>{
-    const rc = hit.getBoundingClientRect();
-    const px = (ev.clientX-rc.left)/rc.width*(W-L-R);
-    let i = Math.round(px/(W-L-R)*(N-1)); i = Math.max(0,Math.min(N-1,i));
-    const x = X(i);
-    cross.setAttribute('x1',x); cross.setAttribute('x2',x); cross.setAttribute('opacity','.7');
-    dotH.setAttribute('cx',x); dotH.setAttribute('cy',YH[i]); dotH.setAttribute('opacity','1');
-    dotI.setAttribute('cx',x); dotI.setAttribute('cy',YI[i]); dotI.setAttribute('opacity','1');
+  const svg=blk.querySelector('.tracksvg'), svg2=blk.querySelector('.spsvg');
+  const tip=blk.querySelector('.tip'), zr=blk.querySelector('.zrange');
+  let G=null;
+
+  function render(){
+    const n=view.i1-view.i0+1;
+    const X=i=>n>1?L+(i-view.i0)*(W-L-R)/(n-1):(L+W-R)/2;
+
+    /* 两条线各自按「当前窗口」重新定标，缩到哪段就看哪段的形状 */
+    const hm=zRange(T.hold,view.i0,view.i1), im=zRange(T.idx,view.i0,view.i1);
+    const top=Tp+10, bot=H-B-8, hh=bot-top;
+    const YH=[],YI=[];
+    for(let i=view.i0;i<=view.i1;i++){
+      YH[i]=top+(hm[1]-T.hold[i])/(hm[1]-hm[0])*hh;
+      YI[i]=top+(im[1]-T.idx[i])/(im[1]-im[0])*hh;
+    }
+    let g='';
+    for(let k=0;k<=4;k++){const y=top+k*hh/4;
+      g+='<line x1="'+L+'" y1="'+y+'" x2="'+(W-R)+'" y2="'+y+'" stroke="#2A2F39" stroke-width="1"/>';}
+    let axis='';
+    for(let k=0;k<=4;k++){const f=k/4,y=top+f*hh;
+      axis+='<text x="'+(L-8)+'" y="'+(y+4)+'" fill="#8A93A3" font-size="10.5" text-anchor="end" font-family="Consolas">'+(hm[1]-f*(hm[1]-hm[0])).toFixed(3)+'</text>';
+      axis+='<text x="'+(W-R+8)+'" y="'+(y+4)+'" fill="#8A93A3" font-size="10.5" font-family="Consolas">'+(im[1]-f*(im[1]-im[0])).toFixed(0)+'</text>';}
+    let xt='';
+    const step=Math.max(1,Math.ceil(n/9));
+    for(let i=view.i0;i<=view.i1;i+=step){
+      xt+='<text x="'+X(i)+'" y="'+(H-8)+'" fill="#8A93A3" font-size="10.5" text-anchor="middle" font-family="Consolas">'+T.dates[i].slice(0,7)+'</text>';}
+    let sh='';
+    for(let i=Math.max(view.i0,1);i<=view.i1;i++){
+      if(Math.abs(T.spread[i])>=25)
+        sh+='<rect x="'+X(i-1)+'" y="'+Tp+'" width="'+Math.max(1.2,X(i)-X(i-1)+1)+'" height="'+(H-B-Tp)+'" fill="'+(T.spread[i]>0?'#E8453C':'#1FB37A')+'" opacity="0.07"/>';}
+    const pth=ys=>{let s='';for(let i=view.i0;i<=view.i1;i++){s+=(i===view.i0?'M':'L')+X(i).toFixed(1)+' '+ys[i].toFixed(1);}return s;};
+    svg.innerHTML=g+sh+
+      '<line x1="'+L+'" y1="'+(H-B)+'" x2="'+(W-R)+'" y2="'+(H-B)+'" stroke="#2A2F39"/>'+
+      '<path d="'+pth(YI)+'" fill="none" stroke="#9B6BFF" stroke-width="2" opacity=".95"/>'+
+      '<path d="'+pth(YH)+'" fill="none" stroke="#FF8A1F" stroke-width="2.4"/>'+axis+xt+
+      '<line class="cross" x1="0" y1="'+Tp+'" x2="0" y2="'+(H-B)+'" stroke="#8A93A3" stroke-width="1" stroke-dasharray="3 3" opacity="0"/>'+
+      '<circle class="dotH" r="4" fill="#FF8A1F" stroke="#181A20" stroke-width="1.5" opacity="0"/>'+
+      '<circle class="dotI" r="4" fill="#9B6BFF" stroke="#181A20" stroke-width="1.5" opacity="0"/>';
+
+    /* Spread 副图：阈值 0 轴永远留在视野内，缩小时不会把 ±25 线挤出画面 */
+    const sm=zRange(T.spread,view.i0,view.i1);
+    const lo=Math.min(sm[0],-25,0), hi=Math.max(sm[1],25,0);
+    const Y2=v=>T2+(hi-v)/((hi-lo)||1)*(H2-B2-T2);
+    const X2=i=>n>1?L2+(i-view.i0)*(W2-L2-R2)/(n-1):(L2+W2-R2)/2;
+    let gl='';
+    for(let k=0;k<=4;k++){const y=T2+k*(H2-B2-T2)/4;
+      gl+='<line x1="'+L2+'" y1="'+y+'" x2="'+(W2-R2)+'" y2="'+y+'" stroke="#2A2F39" stroke-width="1"/>';}
+    const bw=Math.max(1,(W2-L2-R2)/n*0.7);
+    let bars='';
+    for(let i=view.i0;i<=view.i1;i++){
+      const v=T.spread[i]||0,y0=Y2(0),y1=Y2(v);
+      bars+='<rect x="'+(X2(i)-bw/2)+'" y="'+Math.min(y0,y1)+'" width="'+bw+'" height="'+Math.max(Math.abs(y1-y0),0.6)+'" fill="'+(v>=0?'#E8453C':'#1FB37A')+'" opacity="0.72"/>';}
+    let thr='';
+    for(const t of [25,-25]){
+      thr+='<line x1="'+L2+'" y1="'+Y2(t)+'" x2="'+(W2-R2)+'" y2="'+Y2(t)+'" stroke="#F5A623" stroke-width="1" stroke-dasharray="5 4" opacity="0.75"/>'+
+      '<text x="'+(W2-R2+6)+'" y="'+(Y2(t)+4)+'" fill="#F5A623" font-size="10" font-family="Consolas">'+(t>0?'+':'')+t+'</text>';}
+    let spAxis='';
+    for(let k=0;k<=4;k++){const f=k/4,y=T2+f*(H2-B2-T2);
+      spAxis+='<text x="'+(L2-8)+'" y="'+(y+4)+'" fill="#8A93A3" font-size="10.5" text-anchor="end" font-family="Consolas">'+(hi-f*(hi-lo)).toFixed(0)+'</text>';}
+    svg2.innerHTML=gl+bars+'<line x1="'+L2+'" y1="'+Y2(0)+'" x2="'+(W2-R2)+'" y2="'+Y2(0)+'" stroke="#4a5160"/>'+thr+spAxis;
+
+    G={X:X,YH:YH,YI:YI,n:n};
+    zr.textContent='当前 '+n+' 个交易日：'+T.dates[view.i0]+' ~ '+T.dates[view.i1]+'（共 '+N+' 天）';
+    for(const b of blk.querySelectorAll('.zbtn')){
+      const len=Number(b.dataset.len);
+      const on = len<0 ? false : (len===0 ? n===N : len===n);   /* 复位按钮不参与高亮 */
+      b.classList.toggle('on',on);
+    }
+  }
+
+  function setLen(len){
+    if(len===-1){view.i1=N-1;view.i0=Math.max(0,N-250);}
+    else if(len<=0||len>=N){view.i0=0;view.i1=N-1;}
+    else {view.i1=N-1;view.i0=Math.max(0,N-len);}
+    render();
+  }
+  for(const b of blk.querySelectorAll('.zbtn')) b.addEventListener('click',()=>setLen(Number(b.dataset.len)));
+  attachZoom(svg,view,N,render,L,R);
+  attachZoom(svg2,view,N,render,L2,R2);
+
+  svg.addEventListener('mousemove',ev=>{
+    if(!G)return;
+    const rc=svg.getBoundingClientRect();
+    const px=(ev.clientX-rc.left)/rc.width*1000;
+    let i=view.i0+Math.round((px-L)/Math.max(1,(W-L-R))*(G.n-1));
+    i=Math.max(view.i0,Math.min(view.i1,i));
+    const x=G.X(i);
+    const cross=svg.querySelector('.cross'),dH=svg.querySelector('.dotH'),dI=svg.querySelector('.dotI');
+    if(cross){cross.setAttribute('x1',x);cross.setAttribute('x2',x);cross.setAttribute('opacity','.7');}
+    if(dH){dH.setAttribute('cx',x);dH.setAttribute('cy',G.YH[i]);dH.setAttribute('opacity','1');}
+    if(dI){dI.setAttribute('cx',x);dI.setAttribute('cy',G.YI[i]);dI.setAttribute('opacity','1');}
     let rows='';
-    for (const kk in T.names){ const c=T.chg[kk][i];
-      rows += '<div style="display:flex;justify-content:space-between;gap:14px"><span style="color:#8A93A3">'+esc(T.names[kk])+
+    for(const kk in T.names){const c=T.chg[kk][i];
+      rows+='<div style="display:flex;justify-content:space-between;gap:14px"><span style="color:#8A93A3">'+esc(T.names[kk])+
         '</span><span>'+fmt(T.shares[kk][i],2)+' 亿份 <span class="'+(c>=0?'pos':'neg')+'">'+sign(c,2)+'</span></span></div>';}
-    tip.innerHTML = '<b>'+T.dates[i]+'</b><div style="color:var(--orange)">持仓占比 '+fmt(T.hold[i],4)+'%</div>'+
+    tip.innerHTML='<b>'+T.dates[i]+'</b><div style="color:var(--orange)">持仓占比 '+fmt(T.hold[i],4)+'%</div>'+
       '<div style="color:var(--purple)">'+S.index_name+' '+fmt(T.idx[i],2)+'</div>'+
       '<div style="color:var(--blue)">Spread '+sign(T.spread[i],1)+'</div><div style="margin-top:5px">'+rows+'</div>';
     tip.style.display='block';
-    const pr = svgEl.getBoundingClientRect(), br = blk.getBoundingClientRect();
-    let lx = ev.clientX - br.left + 16;
-    if (lx + 240 > br.width) lx = ev.clientX - br.left - 236;
-    tip.style.left = lx + 'px';
-    tip.style.top = (ev.clientY - br.top + 14) + 'px';
+    const br=blk.getBoundingClientRect();
+    let lx=ev.clientX-br.left+16;
+    if(lx+240>br.width) lx=ev.clientX-br.left-236;
+    tip.style.left=lx+'px'; tip.style.top=(ev.clientY-br.top+14)+'px';
   });
-  hit.addEventListener('mouseleave', ()=>{ tip.style.display='none';
-    cross.setAttribute('opacity','0'); dotH.setAttribute('opacity','0'); dotI.setAttribute('opacity','0'); });
+  svg.addEventListener('mouseleave',()=>{
+    tip.style.display='none';
+    for(const c of svg.querySelectorAll('.cross,.dotH,.dotI')) c.setAttribute('opacity','0');
+  });
+
+  render();
 }
 D.order.forEach(drawTrack);
 
@@ -435,107 +540,138 @@ if (D.ratios && D.ratios.items) {
   $('ratioCards').innerHTML = h;
 }
 
-/* ---------- LSI vs GLI 走势图（对应监测图行 3） ---------- */
+/* ---------- LSI vs GLI 走势图（对应监测图行 3，可缩放） ---------- */
 function drawLsi(){
   const L = D.lsi;
   if (!L || !L.hist || !L.cal) return;
   const h = L.hist;
-  let cal = L.cal, lsi = h.lsi || [], gli = h.gli || [];
-  const TAKE = 260;                      // 展示最近约一年
-  let n = Math.min(cal.length, lsi.length, gli.length);
-  const s0 = Math.max(0, n - TAKE);
-  cal = cal.slice(s0, n); lsi = lsi.slice(s0, n); gli = gli.slice(s0, n);
-  n = cal.length;
-  if (n < 5) return;
-
-  const rrpT = (h.rrp_T||[]).slice(s0, s0+n);
-  const rrpP = (h.rrp_pct||[]).slice(s0, s0+n);
-  const cd   = (h.credit||[]).slice(s0, s0+n);
-  const imp  = (h.impulse||[]).slice(s0, s0+n);
+  const cal = L.cal;
+  const lsiAll = h.lsi || [], gliAll = h.gli || [];
+  const rrpTAll = h.rrp_T || [], rrpPAll = h.rrp_pct || [];
+  const cdAll = h.credit || [], impAll = h.impulse || [];
+  const N = Math.min(cal.length, lsiAll.length, gliAll.length);
+  if (N < 5) return;
+  const view = {i0: Math.max(0, N-260), i1: N-1};   /* 默认展示最近约一年，可缩到全历史 */
 
   const W=1000,H=360,Lf=62,R=66,Tp=14,B=30;
-  const X = i => Lf + i*(W-Lf-R)/(n-1);
-  function scale(arr, lo, hi){
-    const v = arr.filter(x=>x!==null && x!==undefined);
-    const m = Math.min.apply(null,v), M = Math.max.apply(null,v);
-    const a=(hi-lo)/((M-m)||1), b=lo-a*m;
-    return arr.map(x => (x===null||x===undefined)?null:a*x+b);
-  }
-  // 左轴把三条阈值线纳入范围，保证阈值可见
-  const lv = lsi.filter(x=>x!==null).concat([20,50,-30]);
-  const lMin = Math.min.apply(null,lv), lMax = Math.max.apply(null,lv);
-  function yL(v){ return Tp+10 + (lMax-v)/((lMax-lMin)||1)*(H-B-8-Tp-10); }
-  const gv = gli.filter(x=>x!==null);
-  const gMin = Math.min.apply(null,gv), gMax = Math.max.apply(null,gv);
-  function yG(v){ return Tp+10 + (gMax-v)/((gMax-gMin)||1)*(H-B-8-Tp-10); }
-
-  let g='';
-  for(let k=0;k<=4;k++){const y=Tp+10+k*(H-B-8-Tp-10)/4;
-    g+='<line x1="'+Lf+'" y1="'+y+'" x2="'+(W-R)+'" y2="'+y+'" stroke="#2A2F39" stroke-width="1"/>';}
-  // 劈叉/阈值阴影：LSI ≥ 20 偏紧（红）、≤ -30 极端宽松（绿）
-  let sh='';
-  for(let i=1;i<n;i++){
-    const v=lsi[i]; if(v===null||v===undefined) continue;
-    if(v>=20) sh+='<rect x="'+X(i-1)+'" y="'+Tp+'" width="'+(X(i)-X(i-1)+1)+'" height="'+(H-B-Tp)+'" fill="#E8453C" opacity="0.07"/>';
-    else if(v<=-30) sh+='<rect x="'+X(i-1)+'" y="'+Tp+'" width="'+(X(i)-X(i-1)+1)+'" height="'+(H-B-Tp)+'" fill="#1FB37A" opacity="0.07"/>';
-  }
-  let thr='';
-  for(const t of [50,20,-30]){
-    const y=yL(t);
-    const col = t===50?'#8B1A1A':(t===20?'#E8453C':'#1FB37A');
-    thr+='<line x1="'+Lf+'" y1="'+y+'" x2="'+(W-R)+'" y2="'+y+'" stroke="'+col+'" stroke-width="1" stroke-dasharray="5 4" opacity="0.8"/>'
-      +'<text x="'+(W-R+6)+'" y="'+(y+4)+'" fill="'+col+'" font-size="10" font-family="Consolas">'+(t>0?'+':'')+t+'</text>';
-  }
-  let axis='';
-  for(let k=0;k<=4;k++){const f=k/4, y=Tp+10+f*(H-B-8-Tp-10);
-    axis+='<text x="'+(Lf-8)+'" y="'+(y+4)+'" fill="#FF8A1F" font-size="10.5" text-anchor="end" font-family="Consolas">'+(lMax-f*(lMax-lMin)).toFixed(0)+'</text>';
-    axis+='<text x="'+(W-R+8)+'" y="'+(y+4)+'" fill="#4C9AFF" font-size="10.5" font-family="Consolas">'+(gMax-f*(gMax-gMin)).toFixed(2)+'</text>';}
-  let xt='';
-  const step=Math.max(1,Math.floor(n/12));
-  for(let i=0;i<n;i+=step){ xt+='<text x="'+X(i)+'" y="'+(H-8)+'" fill="#8A93A3" font-size="10.5" text-anchor="middle" font-family="Consolas">'+String(cal[i]).slice(0,7)+'</text>';}
-
-  const pL = lsi.map((v,i)=>((v===null||v===undefined)?null:((i?'L':'M')+X(i).toFixed(1)+' '+yL(v).toFixed(1)))).filter(Boolean).join('');
-  const pG = gli.map((v,i)=>((v===null||v===undefined)?null:((i?'L':'M')+X(i).toFixed(1)+' '+yG(v).toFixed(1)))).filter(Boolean).join('');
-
   const el = $('lsiChart');
-  el.innerHTML = g+sh+
-    '<line x1="'+Lf+'" y1="'+(H-B)+'" x2="'+(W-R)+'" y2="'+(H-B)+'" stroke="#2A2F39"/>'+
-    '<path d="'+pG+'" fill="none" stroke="#4C9AFF" stroke-width="2.1" opacity=".95"/>'+
-    '<path d="'+pL+'" fill="none" stroke="#FF8A1F" stroke-width="2.4"/>'+
-    thr+axis+xt+
-    '<line id="lcross" x1="0" y1="'+Tp+'" x2="0" y2="'+(H-B)+'" stroke="#8A93A3" stroke-width="1" stroke-dasharray="3 3" opacity="0"/>'+
-    '<circle id="ldotL" r="4" fill="#FF8A1F" stroke="#181A20" stroke-width="1.5" opacity="0"/>'+
-    '<circle id="ldotG" r="4" fill="#4C9AFF" stroke="#181A20" stroke-width="1.5" opacity="0"/>'+
-    '<rect x="'+Lf+'" y="'+Tp+'" width="'+(W-Lf-R)+'" height="'+(H-B-Tp)+'" fill="transparent" id="lhit"/>';
 
-  const tip=$('lsiTip'), hit=$('lhit'), cross=$('lcross'), dL=$('ldotL'), dG=$('ldotG');
-  hit.addEventListener('mousemove', ev=>{
-    const rc=hit.getBoundingClientRect();
-    const px=(ev.clientX-rc.left)/rc.width*(W-Lf-R);
-    let i=Math.round(px/(W-Lf-R)*(n-1)); i=Math.max(0,Math.min(n-1,i));
-    // 跳过左轴的空值点
-    while(i>0 && (lsi[i]===null||lsi[i]===undefined)) i--;
-    const x=X(i);
-    cross.setAttribute('x1',x); cross.setAttribute('x2',x); cross.setAttribute('opacity','.7');
-    if(lsi[i]!==null&&lsi[i]!==undefined){ dL.setAttribute('cx',x); dL.setAttribute('cy',yL(lsi[i])); dL.setAttribute('opacity','1'); }
-    if(gli[i]!==null&&gli[i]!==undefined){ dG.setAttribute('cx',x); dG.setAttribute('cy',yG(gli[i])); dG.setAttribute('opacity','1'); }
-    const lsiv = lsi[i], gliv = gli[i];
-    const st = (lsiv===null||lsiv===undefined)?'—':
+  /* 区间按钮 */
+  const zb = $('lsiZbar');
+  let btns='';
+  for(const rg of RANGES) btns+='<button class="zbtn" data-len="'+rg[1]+'">'+rg[0]+'</button>';
+  btns+='<button class="zbtn" data-len="-1" title="回到最近一年">复位</button>';
+  zb.innerHTML = btns + '<span class="zhint">滚轮缩放 · 按住拖拽平移 · 双击复位</span><span class="zrange"></span>';
+  const zr = zb.querySelector('.zrange');
+
+  let G=null;
+  function render(){
+    const i0=view.i0, i1=view.i1, n=i1-i0+1;
+    const X=i=>Lf+(i-i0)*(W-Lf-R)/Math.max(1,(n-1));
+    /* 左右轴都按当前窗口定标；左轴额外纳入三条阈值线，保证阈值始终可见 */
+    let lw=[];
+    for(let i=i0;i<=i1;i++){const v=lsiAll[i]; if(v!==null&&v!==undefined) lw.push(v);}
+    lw=lw.concat([20,50,-30]);
+    const lMin=Math.min.apply(null,lw), lMax=Math.max.apply(null,lw);
+    const yL=v=>Tp+10+(lMax-v)/((lMax-lMin)||1)*(H-B-8-Tp-10);
+    let gw=[];
+    for(let i=i0;i<=i1;i++){const v=gliAll[i]; if(v!==null&&v!==undefined) gw.push(v);}
+    if(!gw.length) gw=[0,1];
+    const gMin=Math.min.apply(null,gw), gMax=Math.max.apply(null,gw);
+    const yG=v=>Tp+10+(gMax-v)/((gMax-gMin)||1)*(H-B-8-Tp-10);
+
+    let g='';
+    for(let k=0;k<=4;k++){const y=Tp+10+k*(H-B-8-Tp-10)/4;
+      g+='<line x1="'+Lf+'" y1="'+y+'" x2="'+(W-R)+'" y2="'+y+'" stroke="#2A2F39" stroke-width="1"/>';}
+    /* 背景带：LSI≥20 偏紧(红)、≤-30 极端宽松(绿) */
+    let sh='';
+    for(let i=Math.max(i0,1);i<=i1;i++){
+      const v=lsiAll[i]; if(v===null||v===undefined) continue;
+      const col = v>=20 ? '#E8453C' : (v<=-30 ? '#1FB37A' : null);
+      if(col) sh+='<rect x="'+X(i-1)+'" y="'+Tp+'" width="'+Math.max(1.2,X(i)-X(i-1)+1)+'" height="'+(H-B-Tp)+'" fill="'+col+'" opacity="0.07"/>';
+    }
+    let thr='';
+    for(const t of [50,20,-30]){
+      const y=yL(t), col = t===50?'#8B1A1A':(t===20?'#E8453C':'#1FB37A');
+      thr+='<line x1="'+Lf+'" y1="'+y+'" x2="'+(W-R)+'" y2="'+y+'" stroke="'+col+'" stroke-width="1" stroke-dasharray="5 4" opacity="0.8"/>'+
+        '<text x="'+(W-R+6)+'" y="'+(y+4)+'" fill="'+col+'" font-size="10" font-family="Consolas">'+(t>0?'+':'')+t+'</text>';
+    }
+    let axis='';
+    for(let k=0;k<=4;k++){const f=k/4, y=Tp+10+f*(H-B-8-Tp-10);
+      axis+='<text x="'+(Lf-8)+'" y="'+(y+4)+'" fill="#FF8A1F" font-size="10.5" text-anchor="end" font-family="Consolas">'+(lMax-f*(lMax-lMin)).toFixed(0)+'</text>';
+      axis+='<text x="'+(W-R+8)+'" y="'+(y+4)+'" fill="#4C9AFF" font-size="10.5" font-family="Consolas">'+(gMax-f*(gMax-gMin)).toFixed(2)+'</text>';}
+    let xt='';
+    const step=Math.max(1,Math.ceil(n/9));
+    for(let i=i0;i<=i1;i+=step){
+      xt+='<text x="'+X(i)+'" y="'+(H-8)+'" fill="#8A93A3" font-size="10.5" text-anchor="middle" font-family="Consolas">'+String(cal[i]).slice(0,7)+'</text>';}
+
+    const pth=(arr,yf)=>{let s='',pen=false;
+      for(let i=i0;i<=i1;i++){const v=arr[i];
+        if(v===null||v===undefined){pen=false;continue;}
+        s+=(pen?'L':'M')+X(i).toFixed(1)+' '+yf(v).toFixed(1);pen=true;}
+      return s;};
+
+    el.innerHTML=g+sh+
+      '<line x1="'+Lf+'" y1="'+(H-B)+'" x2="'+(W-R)+'" y2="'+(H-B)+'" stroke="#2A2F39"/>'+
+      '<path d="'+pth(gliAll,yG)+'" fill="none" stroke="#4C9AFF" stroke-width="2.1" opacity=".95"/>'+
+      '<path d="'+pth(lsiAll,yL)+'" fill="none" stroke="#FF8A1F" stroke-width="2.4"/>'+
+      thr+axis+xt+
+      '<line class="cross" x1="0" y1="'+Tp+'" x2="0" y2="'+(H-B)+'" stroke="#8A93A3" stroke-width="1" stroke-dasharray="3 3" opacity="0"/>'+
+      '<circle class="dotL" r="4" fill="#FF8A1F" stroke="#181A20" stroke-width="1.5" opacity="0"/>'+
+      '<circle class="dotG" r="4" fill="#4C9AFF" stroke="#181A20" stroke-width="1.5" opacity="0"/>';
+
+    G={X:X,yL:yL,yG:yG,n:n};
+    zr.textContent='当前 '+n+' 个观测日：'+cal[i0]+' ~ '+cal[i1]+'（共 '+N+' 天）';
+    for(const b of zb.querySelectorAll('.zbtn')){
+      const len=Number(b.dataset.len);
+      const on = len<0 ? false : (len===0 ? n===N : len===n);   /* 复位按钮不参与高亮 */
+      b.classList.toggle('on',on);
+    }
+  }
+
+  function setLen(len){
+    if(len===-1){view.i1=N-1;view.i0=Math.max(0,N-250);}
+    else if(len<=0||len>=N){view.i0=0;view.i1=N-1;}
+    else {view.i1=N-1;view.i0=Math.max(0,N-len);}
+    render();
+  }
+  for(const b of zb.querySelectorAll('.zbtn')) b.addEventListener('click',()=>setLen(Number(b.dataset.len)));
+  attachZoom(el,view,N,render,Lf,R);
+
+  /* 悬停明细 */
+  const tip=$('lsiTip');
+  el.addEventListener('mousemove',ev=>{
+    if(!G)return;
+    const rc=el.getBoundingClientRect();
+    const px=(ev.clientX-rc.left)/rc.width*1000;
+    let i=view.i0+Math.round((px-Lf)/Math.max(1,(W-Lf-R))*(G.n-1));
+    i=Math.max(view.i0,Math.min(view.i1,i));
+    while(i>view.i0 && (lsiAll[i]===null||lsiAll[i]===undefined)) i--;
+    const x=G.X(i);
+    const cross=el.querySelector('.cross'),dL=el.querySelector('.dotL'),dG=el.querySelector('.dotG');
+    if(cross){cross.setAttribute('x1',x);cross.setAttribute('x2',x);cross.setAttribute('opacity','.7');}
+    if(dL && lsiAll[i]!==null && lsiAll[i]!==undefined){dL.setAttribute('cx',x);dL.setAttribute('cy',G.yL(lsiAll[i]));dL.setAttribute('opacity','1');}
+    if(dG && gliAll[i]!==null && gliAll[i]!==undefined){dG.setAttribute('cx',x);dG.setAttribute('cy',G.yG(gliAll[i]));dG.setAttribute('opacity','1');}
+    const lsiv=lsiAll[i], gliv=gliAll[i];
+    const st=(lsiv===null||lsiv===undefined)?'—':
       (lsiv>=50?'极端紧张':(lsiv>=20?'偏紧':(lsiv<0?(lsiv<=-30?'极端宽松':'正常宽松'):'中性平衡')));
-    tip.innerHTML = '<b>'+String(cal[i])+'</b>'+
+    tip.innerHTML='<b>'+String(cal[i])+'</b>'+
       '<div style="color:#FF8A1F">LSI '+fmt(lsiv,1)+' bps（'+st+'）</div>'+
       '<div style="color:#4C9AFF">GLI '+fmt(gliv,3)+' T</div>'+
-      '<div style="color:#8A93A3">RRP '+fmt(rrpT[i],3)+' T（峰值占比 '+fmt(rrpP[i],1)+'%）</div>'+
-      '<div style="color:#8A93A3">信用利差 '+fmt(cd[i],0)+' bps　冲量 '+sign(imp[i],2)+'%</div>';
+      '<div style="color:#8A93A3">RRP '+fmt(rrpTAll[i],3)+' T（峰值占比 '+fmt(rrpPAll[i],1)+'%）</div>'+
+      '<div style="color:#8A93A3">信用利差 '+fmt(cdAll[i],0)+' bps　冲量 '+sign(impAll[i],2)+'%</div>';
     tip.style.display='block';
-    const br=el.getBoundingClientRect(), pr=$('lsiPanel').getBoundingClientRect();
-    let lx = ev.clientX - pr.left + 16;
-    if (lx + 250 > pr.width) lx = ev.clientX - pr.left - 246;
-    tip.style.left = lx+'px';
-    tip.style.top = (ev.clientY - pr.top + 14)+'px';
+    const pr=$('lsiPanel').getBoundingClientRect();
+    let lx=ev.clientX-pr.left+16;
+    if(lx+250>pr.width) lx=ev.clientX-pr.left-246;
+    tip.style.left=lx+'px'; tip.style.top=(ev.clientY-pr.top+14)+'px';
   });
-  hit.addEventListener('mouseleave', ()=>{ tip.style.display='none';
-    cross.setAttribute('opacity','0'); dL.setAttribute('opacity','0'); dG.setAttribute('opacity','0'); });
+  el.addEventListener('mouseleave',()=>{
+    tip.style.display='none';
+    for(const c of el.querySelectorAll('.cross,.dotL,.dotG')) c.setAttribute('opacity','0');
+  });
+
+  render();
 }
 if (D.lsi) drawLsi();
 

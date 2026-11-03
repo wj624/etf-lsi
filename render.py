@@ -134,9 +134,12 @@ def main():
         if not pk:
             continue
         ax = fig.add_subplot(gs[r, 0])
-        dates = [datetime.datetime.strptime(d, '%Y-%m-%d').date() for d in pk['dates']]
+        # 看板可以缩放到 5 年，但这张 PNG 只画最近 250 个交易日：
+        # 1212 天塞进一张 17 英寸宽的图，线会糊成一团，反而看不出背离。
+        PN = min(250, len(pk['dates']))
+        dates = [datetime.datetime.strptime(d, '%Y-%m-%d').date() for d in pk['dates'][-PN:]]
         S = pk['summary']
-        draw_divergence(ax, dates, pk['hold'], pk['idx'], pk['spread'], S['labels'],
+        draw_divergence(ax, dates, pk['hold'][-PN:], pk['idx'][-PN:], pk['spread'][-PN:], S['labels'],
                         no_emoji('%s · %s（截至 %s｜Spread %+.1f）' % (S['title'], S['status'], S['date'], S['spread'])))
         r += 1
 

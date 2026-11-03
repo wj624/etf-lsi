@@ -20,14 +20,21 @@ CACHE = os.path.join(common.BASE, 'raw_data.json')
 # 现在份额/净值改由交易所官方源（fetch_exchange.py，T+0）覆盖，滞后天数大幅缩短，
 # 故尾部重抓窗口从 8 缩到 5，省下 westock 的调用开销。
 REFRESH_TAIL = int(os.environ.get('ETF_REFRESH_TAIL', '5'))
-DAYS = int(os.environ.get('ETF_DAYS', '250'))
+# 展示窗口：1250 个交易日 ≈ 5 年。
+# 实测 westock kline 单次最多返回 1212 行（2021-11 起），5 年一次拉完，无需分段。
+# 超出窗口的旧数据在写回缓存时会被裁掉（见 build_track 的滚动裁剪），缓存不会无限增长。
+DAYS = int(os.environ.get('ETF_DAYS', '1250'))
+CAL_DAYS = int(os.environ.get('ETF_CAL_DAYS', '2000'))      # 日历天回溯：要够 5 年，并留出长假余量
+KLINE_LIMIT = int(os.environ.get('ETF_KLINE_LIMIT', '1500'))
 
 
-def get_trade_days(end=None, days=520):
+def get_trade_days(end=None, days=None, limit=None):
     """A 股交易日历（沪深300 与创业板共用）"""
+    days = CAL_DAYS if days is None else days
+    limit = KLINE_LIMIT if limit is None else limit
     end = end or datetime.date.today().isoformat()
     start = (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
-    out = common.run(['kline', 'sh000300', '--start', start, '--end', end, '--limit', '400'])
+    out = common.run(['kline', 'sh000300', '--start', start, '--end', end, '--limit', str(limit)])
     rows = common.parse_kline(out)
     if not rows:
         raise RuntimeError('kline failed：取不到交易日历')
@@ -121,6 +128,13 @@ def build_track(track, days, jobs):
         except Exception:
             old = {}
     results = dict(old)
+    # 滚动窗口：只保留展示窗口内的交易日，超出 5 年的旧数据直接丢弃（避免缓存与产物无限膨胀）
+    win = set(dates)
+    stale = [d for d in results if d not in win]
+    if stale:
+        for d in stale:
+            results.pop(d, None)
+        print('[%s] 裁剪窗口外旧数据 %d 天（保留 %d 天）' % (track, len(stale), len(results)))
     print('[%s] cache loaded %d days' % (track, len(results)))
 
     todo = set(d for d in dates if d not in results)

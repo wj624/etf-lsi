@@ -34,6 +34,25 @@ def norm(series):
     return [(v - lo) / rng * 100.0 for v in series]
 
 
+def roll_norm(series, win=250):
+    """滚动窗口归一化（0~100 分位）。
+
+    展示窗口从 250 天扩到 5 年后，不能再对整段序列做 min/max —— 那样历史越长、
+    极值越可能落在远端，近端曲线会被压成一条直线，Spread 的 ±25 阈值也就失去意义。
+    这里对每个点只取它之前 win 个观测（不足则用已全部样本）做 min/max：
+      · 最后一点 == 原来的整段 norm（窗口就是最后 250 天），今日读数完全不变；
+      · 历史各点各自可比，扩窗不会让旧结论漂移。
+    """
+    out = []
+    for i in range(len(series)):
+        lo_i = max(0, i - win + 1)
+        w = series[lo_i:i + 1]
+        lo, hi = min(w), max(w)
+        rng = hi - lo if hi > lo else 1.0
+        out.append((series[i] - lo) / rng * 100.0)
+    return out
+
+
 def slope(ys, n=20):
     m = min(n, len(ys))
     y = ys[-m:]
@@ -46,6 +65,59 @@ def slope(ys, n=20):
     return sum((xi - mx) * (yi - my) for xi, yi in zip(x, y)) / den
 
 
+def repair_price_steps(rows, etfs, near=10, th=1.5, jump=0.35):
+    """修复单只 ETF 的「净值复权断点」，避免 5 年曲线出现假台阶。
+
+    背景：westock 对个别 ETF 的历史净值/收盘价做过前复权（份额不变、价格整体打折）。
+    实测 510310 在 2024-09-20 之前的净值只有真实值的一半，导致「份额×净值」在断点处凭空翻倍，
+    5 年持仓占比曲线上就是一道 +17% 的假台阶。
+
+    判据（两道，都得过）：
+      ① 单日比值突变：ratio = nav ÷ 指数点位 对指数 ETF 长期近似常数，一天里变化超过 jump(35%)
+         在数学上不可能，只可能是复权断点；
+      ② 持续性：断点后 near(10) 个交易日的中位数与断点前 near 个相差超过 th(1.5) 倍。
+    修正：断点之前的市值整体乘 (后/前)，链式循环直到找不到新的断点。
+    只改 mvs（市值），不动 shares/nav，所以悬停明细里的份额、净值仍是原始值。
+    """
+    n = len(rows)
+    logs = []
+    for code, name, sym in etfs:
+        ratio = []
+        for x in rows:
+            nv, ic = x['nav'].get(code), x['idx_close']
+            ratio.append((nv / ic) if (nv and ic) else None)
+
+        for _round in range(6):          # 最多修 6 处断点
+            best, bi = 0.0, -1
+            for i in range(1, n):
+                a, b = ratio[i - 1], ratio[i]
+                if not a or not b:
+                    continue
+                ch = abs(b / a - 1.0)
+                if ch > best:
+                    best, bi = ch, i
+            if bi < 0 or best <= jump:
+                break
+            pre = [v for v in ratio[max(0, bi - near):bi] if v]
+            post = [v for v in ratio[bi:bi + near] if v]
+            if len(pre) < 3 or len(post) < 3:
+                break
+            mp, mo = statistics.median(pre), statistics.median(post)
+            if not mp or not mo:
+                break
+            if 1.0 / th <= mo / mp <= th:      # 只是一次噪声尖刺，不是断点
+                break
+            k = mo / mp
+            for j in range(bi):
+                v = rows[j]['mvs'].get(code)
+                if v:
+                    rows[j]['mvs'][code] = v * k
+                if ratio[j]:
+                    ratio[j] *= k              # 同步基准，便于继续找下一个断点
+            logs.append('%s %s 之前 ×%.3f（净值被前复权）' % (name, rows[bi]['date'], k))
+    return logs
+
+
 def analyze_track(key):
     cfg = TRACKS[key]
     etfs = cfg['etf_list']
@@ -55,7 +127,9 @@ def analyze_track(key):
     if not daily:
         print('!! %s 无数据' % key)
         return None, None
-    dates = sorted(daily.keys())[-250:]
+    # 展示窗口由取数端决定（fetch_data.DAYS ≈ 5 年），这里不再二次截断到 250 天；
+    # 分位/斜率等指标各自按固定窗口计算（见 roll_norm / slope），与展示长度解耦。
+    dates = sorted(daily.keys())
 
     rows = []
     for d in dates:
@@ -82,6 +156,14 @@ def analyze_track(key):
             'nav': {c: f((r.get(c) or {}).get('nav')) for c, _, _ in etfs},
             'chg': {c: f((r.get(c) or {}).get('sharesChg')) for c, _, _ in etfs},
         })
+
+    # ---- 复权断点修复（净值被整体打折的 ETF，只影响市值，不影响持仓占比的量纲）----
+    _fix = repair_price_steps(rows, etfs)
+    if _fix:
+        print('[%s] 检测到净值复权断点，已按比例还原：%s' % (key, '；'.join(_fix)))
+        for x in rows:                  # 市值改动后必须重算合计
+            vals = [x['mvs'].get(c) for c, _, _ in etfs]
+            x['etf_mv'] = sum(vals) if all(v is not None for v in vals) else None
 
     # ---- 份额披露滞后识别（不捆绑 nav）----
     # 判据：只要 4 只 ETF 当日份额与前一日全部相同，即判定尚未披露并截断尾部
@@ -134,7 +216,7 @@ def analyze_track(key):
     dates = [x['date'] for x in rows]
     hold = [x['etf_mv'] / x['idx_mv'] * 100.0 for x in rows]
     idx = [x['idx_close'] for x in rows]
-    hold_pct, idx_pct = norm(hold), norm(idx)
+    hold_pct, idx_pct = roll_norm(hold), roll_norm(idx)
     spread = [a - b for a, b in zip(hold_pct, idx_pct)]
 
     N = 20
