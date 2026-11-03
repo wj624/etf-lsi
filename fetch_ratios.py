@@ -30,6 +30,27 @@ TAIL = int(os.environ.get('RATIO_TAIL', '260'))
 W_M, W_Q, W_Y = 4, 12, 52
 
 
+def fetch_rows(code, s, e, fq=None, tries=3, waits=(3.0, 8.0)):
+    """抓一段周K，按“能不能解析出 K 线”判断成败。
+
+    不用 common.run 的 retry：它只要 stdout 非空就当成功返回，源把报错打在 stdout 上时
+    一次都不会重试（2026-11-03 07:30 那次 CI 就是这样，整段整段空掉却只跑 30 多秒）。
+    这里自己退避重试，并把源的原话带回去，日志里能分清“没上市”和“被限流”。
+    """
+    args = ['kline', code, '--period', PERIOD, '--start', s, '--end', e, '--limit', '500']
+    if fq:
+        args += ['--fq', fq]
+    raw, rows = '', []
+    for i in range(tries):
+        raw = common.run(args, retry=2, timeout=240)
+        rows = common.parse_kline(raw)
+        if rows:
+            return rows, raw
+        if i < len(waits):
+            time.sleep(waits[i])
+    return rows, raw
+
+
 def get_series(code, fq=None):
     """周K全周期：按 4 年一段拼接"""
     segs, out, empty = [], {}, []
@@ -44,20 +65,39 @@ def get_series(code, fq=None):
         # 截到今天只影响最后一段，前面几段 end 都早于今天，行为不变。
         if e > today:
             e = today
-        args = ['kline', code, '--period', PERIOD, '--start', s, '--end', e, '--limit', '500']
-        if fq:
-            args += ['--fq', fq]
-        rows = common.parse_kline(common.run(args, retry=4, timeout=240))
-        if not rows:
-            time.sleep(1.2)
-            rows = common.parse_kline(common.run(args, retry=4, timeout=240))
+        rows, raw = fetch_rows(code, s, e, fq)
         if not rows:
             empty.append((s, e))
-            print('  !! %s 段 %s~%s 抓空（两次各 4 次重试均无数据）' % (code, s, e), flush=True)
+            tail = ' '.join(str(raw).split())[:160]
+            print('  !! %s 段 %s~%s 抓空%s' %
+                  (code, s, e, ('，源返回：' + tail) if tail else '（多次重试均无数据）'),
+                  flush=True)
         segs.append((s, e, len(rows)))
         for d, c in rows:
             out[d] = c
         y += SEG_YEARS
+        time.sleep(0.3)   # 串行节奏：并发打太猛会被源限流，整段整段地空
+
+    # 补救：只在“这一段的起点之后还有数据”时才值得再试——说明这段本来该有、源临时给空了。
+    # 上市/发布前的空段（起点晚于首个数据日）一次都不重试，省时间也省配额。
+    if empty and out:
+        first = min(out)
+        still = []
+        for s, e in empty:
+            if s < first:
+                still.append((s, e))
+                continue
+            print('  .. %s 段 %s~%s 疑似源侧空返回，隔 12 秒再试一次' % (code, s, e), flush=True)
+            time.sleep(12)
+            rows, _ = fetch_rows(code, s, e, fq, tries=1)
+            if rows:
+                for d, c in rows:
+                    out[d] = c
+                segs = [(a, b, len(rows) if (a, b) == (s, e) else n) for a, b, n in segs]
+                print('  .. %s 段 %s~%s 补救成功，补回 %d 根' % (code, s, e, len(rows)), flush=True)
+            else:
+                still.append((s, e))
+        empty = still
     print('  %-10s %s  %d 根  %s ~ %s   分段:%s%s' %
           (code, PERIOD, len(out), min(out) if out else '-', max(out) if out else '-',
            ' '.join('%s:%d' % (a[:4], n) for a, _, n in segs),
@@ -174,7 +214,7 @@ def main():
                 codes.append((c, f))
     series, empty_segs = {}, {}
     t0 = time.time()
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    with ThreadPoolExecutor(max_workers=2) as ex:
         for (c, f), (s, emp) in zip(codes, ex.map(lambda x: get_series(x[0], x[1]), codes)):
             series[c] = s
             if emp:
@@ -260,11 +300,16 @@ def main():
                 out['items'][p['key']] = prev[p['key']]
             continue
         it = build(p, series)
-        if it:
-            out['items'][p['key']] = it
-            print('%s：当前 %.4f　近%s年分位 %.1f%%（%s）　%s　[数据截至 %s]' %
-                  (p['title'], it['cur'], it['years'], it['pct'], it['word'], it['label'],
-                   it['asof']))
+        if not it:
+            # build 失败（重叠交易日不足）同样会少一张卡，看板 ④ 就残缺了，照样回退旧值
+            print('!! %s 本次算不出来，沿用上一份结果' % p['title'])
+            if p['key'] in prev:
+                out['items'][p['key']] = prev[p['key']]
+            continue
+        out['items'][p['key']] = it
+        print('%s：当前 %.4f　近%s年分位 %.1f%%（%s）　%s　[数据截至 %s]' %
+              (p['title'], it['cur'], it['years'], it['pct'], it['word'], it['label'],
+               it['asof']))
     if not out['items']:
         print('!! 未生成任何比值数据')
         sys.exit(1)
