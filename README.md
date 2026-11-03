@@ -35,7 +35,7 @@
 每天北京时间 21:17
    GitHub Actions 跑流水线 → 生成看板 HTML
         ↓ 自动推送
-    本仓库的 `gh-pages` 分支（GitHub Pages 自动发布，不含任何密钥）
+   本仓库的 `gh-pages` 分支（GitHub Pages 自动发布，不含任何密钥）
         ↓ 同一次运行里并行发布到两个地方（同一份产物）
    ├── https://wj624.github.io/etf-lsi/     GitHub Pages 原生托管
    └── https://etf-lsi.pages.dev/           Cloudflare Pages（国内更稳）
