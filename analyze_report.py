@@ -118,6 +118,41 @@ def repair_price_steps(rows, etfs, near=10, th=1.5, jump=0.35):
     return logs
 
 
+def stale_share_tail(rows, etfs, lookback=12):
+    """尾部有几个交易日的份额其实还没披露 → 需要截断。
+
+    两种形态都要认：
+      1) 冻结：当日份额与前一日完全相同 —— 最常见的 T+1 未披露。
+      2) 回退：当日份额退回到更早某一天的值。westock 的 `etf detail` 在披露前返回的是
+         它手上最后一次快照（不是前一日），而前一日已被交易所官方数据修正成真值，
+         两者不再相等，光靠形态 1 会漏判。
+         2026-11-03 就是这样：份额退回 10-30 的 388.67 亿份，程序据此算出单日
+         -34.3 亿份的“暗中减持”，沪深300 被误报“顶背离”。
+    返回 (天数, 判据说明)。
+    """
+    def sig(row):
+        return tuple((row.get('shares') or {}).get(c) for c, _, _ in etfs)
+
+    def has_data(s):
+        return any(v is not None for v in s)
+
+    k, why, i = 0, '', len(rows) - 1
+    while i >= 1:
+        cur, prev = sig(rows[i]), sig(rows[i - 1])
+        if not has_data(cur):
+            i -= 1
+            continue
+        if cur == prev:
+            k, why, i = k + 1, '与前一交易日相同', i - 1
+            continue
+        j = [x for x in range(max(0, i - lookback), i - 1) if sig(rows[x]) == cur]
+        if j:
+            k, why, i = k + 1, '退回到 %s 的快照' % rows[j[-1]]['date'], i - 1
+            continue
+        break
+    return k, why
+
+
 def analyze_track(key):
     cfg = TRACKS[key]
     etfs = cfg['etf_list']
@@ -166,23 +201,12 @@ def analyze_track(key):
             x['etf_mv'] = sum(vals) if all(v is not None for v in vals) else None
 
     # ---- 份额披露滞后识别（不捆绑 nav）----
-    # 判据：只要 4 只 ETF 当日份额与前一日全部相同，即判定尚未披露并截断尾部
-    def _is_stale(a, b):
-        sa, sb = a.get('shares') or {}, b.get('shares') or {}
-        valid = [c for c, _, _ in etfs if sa.get(c) is not None and sb.get(c) is not None]
-        if not valid:
-            return False
-        return all(sa.get(c) == sb.get(c) for c in valid)
-
-    stale_tail, i = 0, len(rows) - 1
-    while i >= 1 and _is_stale(rows[i], rows[i - 1]):
-        stale_tail += 1
-        i -= 1
+    stale_tail, _why = stale_share_tail(rows, etfs)
     latest_trading_day = rows[-1]['date'] if rows else None
     shares_asof = rows[-1 - stale_tail]['date'] if rows else None
     if stale_tail:
-        print('[%s 份额披露滞后] %s 起的 %d 个交易日沿用上一次披露值，已截断至 %s'
-              % (key, rows[-stale_tail]['date'], stale_tail, shares_asof))
+        print('[%s 份额披露滞后] %s 起的 %d 个交易日份额尚未披露（%s），已截断至 %s'
+              % (key, rows[-stale_tail]['date'], stale_tail, _why, shares_asof))
         rows = rows[:len(rows) - stale_tail]
 
     # ---- chg 用相邻交易日真实份额差重算 ----
