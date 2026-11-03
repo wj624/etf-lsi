@@ -123,6 +123,37 @@ def main():
     if L:
         DATA['lsi'] = L
 
+    # ---- 双源交叉校验（与国家队ETF报表对账）：失败不影响出图 ----
+    try:
+        import reconcile_lite as rc
+        _my = {}
+        for _k in ORDER:
+            _t = (summary.get('tracks') or {}).get(_k) or {}
+            for _r in (_t.get('share_rows') or []):
+                for _sym, _chg in (_r.get('chg') or {}).items():
+                    if _sym in rc.OVERLAP and _chg is not None:
+                        _my.setdefault(_sym, {})[_r['date']] = _chg / 1e8
+        _mine = rc.build_payload("lsi", summary.get('asof', ''), _my)
+        _peer = rc.fetch_json(rc.PEER_NT)
+        _detail = rc.compare(_mine, _peer)
+        _hist = rc.update_history(os.path.join(BASE, 'reconcile_history.json'), _detail)
+        with open(os.path.join(BASE, 'reconcile.json'), 'w', encoding='utf-8') as _f:
+            json.dump(_mine, _f, ensure_ascii=False)
+        DATA['reconcile'] = {
+            'my_asof': _mine['asof'],
+            'peer_asof': (_peer or {}).get('asof'),
+            'peer_ok': bool(_peer),
+            'annotate_date': rc.common_latest_date(_mine, _peer, _detail),
+            'conflicts': [x for x in _detail if x['status'] == 'conflict'],
+            'history': rc.history_rows(_hist, 20),
+        }
+        print('[reconcile] 双源校验: 日=%s 对方=%s 标注日=%s 分歧=%d条' %
+              (_mine['asof'], DATA['reconcile']['peer_asof'], DATA['reconcile']['annotate_date'],
+               len(DATA['reconcile']['conflicts'])), flush=True)
+    except Exception as _e:
+        print('[reconcile] 跳过(异常):', str(_e)[:120], flush=True)
+        DATA['reconcile'] = None
+
     JS = json.dumps(DATA, ensure_ascii=False)
 
     TPL = r'''<!DOCTYPE html>
@@ -298,6 +329,24 @@ for (const k of D.order) {
 }
 if (D.lsi) bh += '<div class="badge ' + D.lsi.level + '">宏观：' + esc(D.lsi.state) + '（' + D.lsi.alert_count + '/' + D.lsi.total + ' 报警）</div>';
 $('badges').innerHTML = bh;
+
+/* ---------- 双源校验横幅（与国家队ETF报表对账） ---------- */
+if (D.reconcile) {
+  const R = D.reconcile, d = R.annotate_date;
+  const cfs = (R.conflicts || []).filter(x => x.date === d);
+  let bcls, btxt;
+  if (!R.peer_ok) {
+    bcls = 'ok'; btxt = '⚪ 双源校验：未取到国家队侧数据（NT 23:00 才更新，本页为其 T-1 预留位）';
+  } else if (cfs.length) {
+    bcls = 'danger';
+    btxt = '⚠️ 双源校验 T-1(' + d + ') 分歧：' + cfs.map(function(x){
+      return x.group + ' ' + x.code + ' 本表' + sign(x.mine,2) + ' vs NT ' + sign(x.peer,2) + ' 亿份';
+    }).join('；');
+  } else {
+    bcls = 'ok'; btxt = '✅ 双源校验 T-1(' + (d || '—') + ')：与国家队侧方向一致';
+  }
+  document.getElementById('badges').innerHTML += '<div class="badge ' + bcls + '">' + esc(btxt) + '</div>';
+}
 
 /* ---------- 顶部卡片 ---------- */
 let ch = '';
@@ -629,6 +678,8 @@ if (D.lsi && D.lsi.diag) {
 
 /* ---------- 近5日份额明细 ---------- */
 let sh = '';
+const _rcAnn = (D.reconcile && D.reconcile.annotate_date) ? D.reconcile.annotate_date : null;
+const _rcCf = (D.reconcile && D.reconcile.conflicts) ? D.reconcile.conflicts : [];
 for (const k of D.order) {
   const T = D.tracks[k], S = T.summary;
   const rows = S.share_rows || [];
@@ -636,19 +687,45 @@ for (const k of D.order) {
   let h = '<thead><tr><th>日期</th>' + syms.map(s=>'<th>'+esc(T.names[s])+'</th>').join('') +
           '<th>四只合计（亿份）</th></tr></thead><tbody>';
   for (const r of rows) {
-    h += '<tr><td>'+r.date+'</td>';
+    const _cfCodes = _rcCf.filter(x => x.date === r.date).map(x => x.code);
+    const _rowWarn = (r.date === _rcAnn && _cfCodes.length > 0);
+    h += '<tr' + (_rowWarn ? ' style="outline:1.5px solid #E8453C"' : '') + '><td>' + r.date +
+         (_rowWarn ? ' <span title="双源校验分歧" style="color:#E8453C">⚠️</span>' : '') + '</td>';
     for (const s of syms) {
       const v = r.shares[s], c = r.chg[s];
+      const _w = _rowWarn && _cfCodes.indexOf(s) >= 0;
       h += '<td>'+(v? (v/1e8).toFixed(3) : '—')+' <span class="'+(c>=0?'pos':'neg')+'">'+
-           (c===null||c===undefined?'—':(c>=0?'+':'')+(c/1e8).toFixed(3))+'</span></td>';
+           (c===null||c===undefined?'—':(c>=0?'+':'')+(c/1e8).toFixed(3))+'</span>'+
+           (_w ? ' <span title="此处两源方向相反" style="color:#E8453C">⚠️</span>' : '')+'</td>';
     }
     h += '<td>'+(r.total_shares?(r.total_shares/1e8).toFixed(2):'—')+'</td></tr>';
   }
   h += '</tbody>';
   sh += '<div class="panel"><h2>'+esc(S.labels.share_tbl)+'（亿份，括号内为当日增减）</h2>' +
     '<div class="hint">份额为基金端 T+1~T+2 披露值；脚本会识别并剔除「沿用上次披露值」的尾部交易日（当前截断至 ' +
-    esc(S.shares_asof||'—') + (S.stale_tail?('，已剔除 '+S.stale_tail+' 个未披露日'):'') + '）。</div>' +
+    esc(S.shares_asof||'—') + (S.stale_tail?('，已剔除 '+S.stale_tail+' 个未披露日'):'') + '）。' +
+    (_rcAnn ? '　｜　双源校验标注日：' + esc(_rcAnn) : '') + '</div>' +
     '<div style="overflow-x:auto"><table>'+h+'</table></div></div>';
+}
+
+/* ---------- 双源校验留痕 ---------- */
+if (D.reconcile && (D.reconcile.history || []).length) {
+  const H = D.reconcile.history;
+  let hh = '<thead><tr><th>日期</th><th>分组</th><th>代码</th><th>本表(亿份)</th><th>国家队(亿份)</th><th>状态</th></tr></thead><tbody>';
+  for (const r of H) {
+    const st = r.status, col = (st === 'conflict') ? 'var(--up)' : 'var(--down)';
+    const mm = (r.last_mine != null ? r.last_mine : r.orig_mine);
+    const pp = (r.last_peer != null ? r.last_peer : r.orig_peer);
+    hh += '<tr><td>'+r.date+'</td><td>'+esc(r.group||'')+'</td><td>'+esc(r.code||'')+'</td>' +
+          '<td>'+sign(mm,2)+'</td><td>'+sign(pp,2)+'</td>' +
+          '<td style="color:'+col+';font-weight:700">'+esc(st)+'</td></tr>';
+  }
+  hh += '</tbody>';
+  sh += '<div class="panel"><h2>双源校验留痕（近20条 · 冲突永久保留）</h2>' +
+    '<div style="overflow-x:auto"><table>'+hh+'</table></div>' +
+    '<div class="hint">「分歧」=当日两源方向相反；「已修正」=后续回补后方向转为一致。' +
+    '比对口径为份额变化(亿份)：沪深300 四只可逐只对账，创业板仅 159915 两站一致。' +
+    '本页为 T-1 标注（NT 23:00 才更新当日）。</div></div>';
 }
 $('shareBlocks').innerHTML = sh;
 
