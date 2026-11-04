@@ -354,7 +354,12 @@ border-radius:10px;padding:12px 15px;margin-bottom:10px;font-size:12.8px;line-he
   <div class="cards" id="ratesCards"></div>
   <div class="subh">曲线形态（横轴＝期限 2Y / 5Y / 10Y / 30Y）：同一条收益率曲线在三个日期的三张快照</div>
   <svg id="ratesCurve" viewBox="0 0 1000 300"></svg>
-  <div class="subh">10Y − 2Y 期限利差（横轴＝交易日）：上图每条线的 2Y→10Y 落差＝这条曲线上的一个点　｜　单位 bp，负值＝倒挂</div>
+  <div class="subh" id="ratesSpreadSub">10Y − 2Y 期限利差（横轴＝交易日）：上图每条线 2Y→10Y 的落差＝这条曲线上的一个点　｜　单位 bp，负值＝倒挂</div>
+  <div class="zbar" id="ratesSpreadTabs" style="margin:0 0 6px">
+    <button class="zbtn on" data-sp="cn_10y_2y">10Y − 2Y</button>
+    <button class="zbtn" data-sp="cn_30y_10y">30Y − 10Y</button>
+    <span class="zhint" id="ratesSpreadHint"></span>
+  </div>
   <svg id="ratesSpread" viewBox="0 0 1000 170"></svg>
 </div>
 
@@ -1215,11 +1220,10 @@ $('shareBlocks').innerHTML = sh;
   $('ratesHint').innerHTML = '国债到期收益率是<b>无风险利率</b>，整条曲线同时隐含增长与通胀预期。'
     + '与 ⑨ 的区别：⑨ 看的是银行间<b>资金价格</b>（DR007/SHIBOR，短端、政策驱动，回答「钱紧不紧」），'
     + '本节看的是<b>债券收益率曲线</b>（回答「钱贵不贵」）——算股债性价比时分母用的就是 10Y 国债。'
-    + '<b>10Y−2Y 为负＝倒挂</b>，历史上极少见，通常意味着市场在定价强宽松；'
-    + '利差走阔多对应宽松预期升温，走平则偏谨慎。'
+    + '利差走阔 / 走平的判读随下方所选期限段而变，见切换条右侧的提示。'
     + '<br><b>本面板两张图的横轴不同</b>：上图是<b>期限</b>（2Y→30Y），三条线是同一条曲线在三个日期的三张快照；'
-    + '下图是<b>交易日</b>，把 10Y−2Y 利差逐日连成一条线。'
-    + '上图每条线上「10Y 比 2Y 高多少」，就是下图在那一天的一个点 —— 下图画的是上图的斜率，不是另一个指标。'
+    + '下图是<b>交易日</b>，把某一段期限利差逐日连成一条线（下方按钮可切换 10Y−2Y / 30Y−10Y）。'
+    + '上图每条线上所选两个期限点的落差，就是下图在那一天的一个点 —— 下图画的是上图的斜率，不是另一个指标。'
     + (inverted ? '　<span style="color:var(--up)">当前 10Y−2Y 已倒挂。</span>' : '')
     + '　数据源：东财 datacenter（国债到期收益率）。';
 
@@ -1312,10 +1316,27 @@ $('shareBlocks').innerHTML = sh;
     $('ratesCurve').innerHTML = g;
   }
 
-  // ── 10Y−2Y 利差历史 ──
-  const sp = rows.map(r => (r.cn_10y_2y === null || r.cn_10y_2y === undefined) ? null : r.cn_10y_2y * 100);
-  const sv = sp.filter(v => v !== null);
-  if (sv.length >= 5) {
+  // ── 期限利差历史（可切换 10Y−2Y / 30Y−10Y）──
+  // 切换的不只是数据：判读口径、小标题、右侧提示都要跟着换，
+  // 否则 30Y−10Y 会被误读成美债 10Y−2Y 倒挂那套衰退叙事。
+  const SPREADS = {
+    cn_10y_2y: {
+      sub: '10Y − 2Y 期限利差（横轴＝交易日）：上图每条线 2Y→10Y 的落差＝这条曲线上的一个点　｜　单位 bp，负值＝倒挂',
+      hint: '短端贴政策利率；利差走阔多对应宽松预期升温，为负＝倒挂（市场定价强宽松）'
+    },
+    cn_30y_10y: {
+      sub: '30Y − 10Y 超长端期限溢价（横轴＝交易日）：上图每条线 10Y→30Y 的落差＝这条曲线上的一个点　｜　单位 bp，负值＝超长端倒挂',
+      hint: '衡量长端相对中端的额外补偿；走阔＝长端要求更高溢价（供给 / 增长预期 / 久期），走平＝溢价压缩'
+    }
+  };
+  function drawSpread(key) {
+    const cfg = SPREADS[key];
+    $('ratesSpreadSub').textContent = cfg.sub;
+    $('ratesSpreadHint').textContent = cfg.hint;
+    const sp = rows.map(r => (r[key] === null || r[key] === undefined) ? null : r[key] * 100);
+    const sv = sp.filter(v => v !== null);
+    if (sv.length < 5) { $('ratesSpread').style.display = 'none'; return; }
+    $('ratesSpread').style.display = '';
     const W = 1000, H = 170, Lf = 62, Rr = 30, Tp = 14, B = 26;
     let mn = Math.min(0, ...sv), mx = Math.max(0, ...sv);
     const pd = (mx - mn) * 0.18 || 1; mn -= pd; mx += pd;
@@ -1328,7 +1349,7 @@ $('shareBlocks').innerHTML = sh;
         + '<text x="' + (Lf - 8) + '" y="' + (yy + 4) + '" fill="#8A93A3" font-size="10.5" text-anchor="end" '
         + 'font-family="Consolas">' + vv.toFixed(0) + '</text>';
     }
-    // 零轴：倒挂的分界
+    // 零轴：所选期限段倒挂的分界（两种口径含义不同，见切换提示）
     g += '<line x1="' + Lf + '" y1="' + Y(0) + '" x2="' + (W - Rr) + '" y2="' + Y(0) + '" stroke="#E8453C" '
       + 'stroke-width="1" stroke-dasharray="4 4" opacity="0.75"/>'
       + '<text x="' + (W - Rr + 3) + '" y="' + (Y(0) + 4) + '" fill="#E8453C" font-size="10" font-family="Consolas">0</text>';
@@ -1348,9 +1369,15 @@ $('shareBlocks').innerHTML = sh;
       + '<text x="' + (W - Rr) + '" y="' + (H - 7) + '" fill="#6b7484" font-size="10.5" text-anchor="end" font-family="Consolas">'
       + esc(rows[n - 1].date) + '</text>';
     $('ratesSpread').innerHTML = g;
-  } else {
-    $('ratesSpread').style.display = 'none';
   }
+  const spreadTabs = $('ratesSpreadTabs');
+  for (const b of spreadTabs.querySelectorAll('.zbtn')) {
+    b.addEventListener('click', () => {
+      for (const x of spreadTabs.querySelectorAll('.zbtn')) x.classList.toggle('on', x === b);
+      drawSpread(b.dataset.sp);
+    });
+  }
+  drawSpread('cn_10y_2y');
 })();
 
 /* ---------- 页脚 ---------- */
