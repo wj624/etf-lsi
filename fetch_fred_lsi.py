@@ -438,6 +438,11 @@ def compute(cal, raw):
         'hist': {
             'lsi': lsi, 'gli': gli, 'rrp_T': rrp_T, 'rrp_pct': rrp_pct,
             'tlc': tlc, 'impulse': impulse, 'credit': credit, 'dfii10': dfii10,
+            # 2 年期美债与政策利率（EFFR）的缺口，单位 bp：
+            # > 0 市场在定价「未来加息」、< 0 定价「降息」。单独存一条派生序列，
+            # 免得看板端还要同时拿 us02y / effr 两条再逐点对齐空值。
+            'us2_effr': [None if (a is None or b is None) else a - b
+                         for a, b in zip(us02y, effr)],
         },
         'raw_latest': {k: (raw.get(k, {}) and None) for k in []},
     }
