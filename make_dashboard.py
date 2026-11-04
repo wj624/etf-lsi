@@ -324,7 +324,18 @@ border-radius:10px;padding:12px 15px;margin-bottom:10px;font-size:12.8px;line-he
 <div class="panel" id="liqCnPanel" style="display:none">
   <h2>⑨ 境内资金面（DR007 / SHIBOR）· 与 ⑤ 的境外流动性互为对照</h2>
   <div class="hint" id="liqCnHint"></div>
+  <div class="legend" id="liqCnLegend"></div>
+  <div class="zbar" id="liqCnBar">
+    <button class="zbtn" data-len="21">1M</button>
+    <button class="zbtn" data-len="63">3M</button>
+    <button class="zbtn" data-len="126">6M</button>
+    <button class="zbtn" data-len="250">1Y</button>
+    <button class="zbtn" data-len="-1" title="全部">复位</button>
+    <span class="zhint">滚轮缩放 · 按住拖拽平移 · 双击复位</span>
+    <span class="zrange" id="liqCnRange"></span>
+  </div>
   <svg id="liqCnChart" viewBox="0 0 1000 300"></svg>
+  <div class="tip" id="liqCnTip" style="display:none"></div>
   <div class="cards" id="liqCnCards"></div>
 </div>
 
@@ -966,27 +977,56 @@ $('shareBlocks').innerHTML = sh;
   const S = D.signals;
   if (!S || !S.liquidity) return;
   const L = S.liquidity;
-  let rows = (L.data || []).filter(r => r && r.date);
-  // 中国货币网两个接口的回溯长度不一样：SHIBOR 能给到 60+ 天，而回购定盘（DR007）
-  // 只回最近约 1 个月且忽略 startDate。若照原样从头画，左侧会有一大段
-  // 「只有 SHIBOR、没有 DR007」的空白，主次颠倒。从首个 DR007 有效点起画。
-  let i0 = -1;
-  for (let i = 0; i < rows.length; i++) {
-    if (rows[i].dr007 !== null && rows[i].dr007 !== undefined) { i0 = i; break; }
-  }
-  if (i0 > 0) rows = rows.slice(i0);
+  const rows = (L.data || []).filter(r => r && r.date);
   if (rows.length < 5) return;
   $('liqCnPanel').style.display = '';
+
+  // 沪深300 归一序列：从主图 track 取 sh000300 的 dates/idx，按日期对齐到资金面 rows，
+  // 以 rows 中第一个能对上指数的日期为 100。用来对照「利率松紧 vs 指数涨跌」。
+  let idxDates = null, idxVals = null, idxName = '沪深300';
+  for (const k of (D.order || [])) {
+    const T = D.tracks && D.tracks[k];
+    if (T && T.summary && T.summary.index_code === 'sh000300') {
+      idxDates = T.dates; idxVals = T.idx;
+      idxName = T.summary.index_name || '沪深300';
+      break;
+    }
+  }
+  let baseIdx = null, idxMap = {};
+  if (idxDates && idxVals) {
+    const byDate = {};
+    for (let j = 0; j < idxDates.length; j++) {
+      if (idxVals[j] !== null && idxVals[j] !== undefined) byDate[idxDates[j]] = idxVals[j];
+    }
+    for (const r of rows) {
+      if (byDate[r.date] !== null && byDate[r.date] !== undefined) { baseIdx = byDate[r.date]; break; }
+    }
+    if (baseIdx) for (const r of rows) {
+      const v = byDate[r.date];
+      idxMap[r.date] = (v === null || v === undefined) ? null : v / baseIdx * 100;
+    }
+  }
+  const lastVal = key => {
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const v = rows[i][key];
+      if (v !== null && v !== undefined && !isNaN(v)) return v;
+    }
+    return null;
+  };
+  let lastIdxVal = null;
+  if (baseIdx) for (let i = rows.length - 1; i >= 0; i--) {
+    const v = idxMap[rows[i].date];
+    if (v !== null && v !== undefined && !isNaN(v)) { lastIdxVal = v; break; }
+  }
 
   const lt = L.latest || {}, dv = L.derived || {};
   $('liqCnHint').innerHTML = '银行间资金价格，单位为年化 %。DR007 是央行公开市场操作实际盯的锚，'
     + '比 SHIBOR 更能代表真实资金面 —— <b>曲线下行＝资金转松，上行＝收紧</b>。'
-    + '⑨ 与 ⑤ 合起来才是完整流动性环境：⑤ 看境外（美联储），⑨ 看境内。'
+    + '右轴紫线为 ' + esc(idxName) + ' 归一=100，用来对照「利率松紧 vs 指数涨跌」。'
     + (lt.date ? '　最新 ' + esc(lt.date) : '')
-    + '　<b>数据源：中国货币网</b>（SHIBOR 八期限 + 银行间质押式回购定盘 FR/FDR）。';
+    + '　<b>数据源：中国货币网</b>；DR007 上游仅回溯约 1 个月（线在后段），SHIBOR 更长。';
 
   const bp = v => (v === null || v === undefined) ? '—' : (v > 0 ? '+' : '') + Number(v).toFixed(1) + ' bp';
-  // 资金利率上行＝收紧＝红；下行＝转松＝绿（沿用 A 股红涨绿跌）
   const bpCol = v => (v === null || v === undefined) ? 'var(--sub)' : (v > 0 ? 'var(--up)' : (v < 0 ? 'var(--down)' : 'var(--txt)'));
 
   let ch = '';
@@ -1007,53 +1047,141 @@ $('shareBlocks').innerHTML = sh;
       + '<div class="d">走阔＝机构提前备付、资金预期偏紧</div></div>';
   $('liqCnCards').innerHTML = ch;
 
-  const W = 1000, H = 300, Lf = 54, R = 78, Tp = 14, B = 30;
-  const n = rows.length;
-  const X = i => Lf + i * (W - Lf - R) / Math.max(1, n - 1);
+  // 图例直接带最新值，省掉右端堆叠的标签，避免 4 条线标签互相压
+  $('liqCnLegend').innerHTML = '<span><i style="background:#FF8A1F"></i>DR007 ' + fmt(lastVal('dr007'), 3) + '%（左轴）</span>'
+    + '<span><i style="background:#4C9AFF"></i>SHIBOR 3M ' + fmt(lastVal('shibor_3m'), 3) + '%（左轴）</span>'
+    + '<span><i style="background:#8A93A3"></i>隔夜 ' + fmt(lastVal('shibor_on'), 3) + '%（左轴）</span>'
+    + (baseIdx ? '<span><i style="background:#9B6BFF"></i>' + esc(idxName) + (lastIdxVal === null ? '' : ' 归一 ' + lastIdxVal.toFixed(1)) + '（右轴）</span>' : '');
+
+  const W = 1000, H = 300, Lf = 54, R = 78, Tp = 14, B = 26;
+  const N = rows.length;
+  const view = {i0: 0, i1: N - 1};
   const series = [
     {key: 'dr007', name: 'DR007', col: '#FF8A1F', w: 2.2},
     {key: 'shibor_3m', name: 'SHIBOR 3M', col: '#4C9AFF', w: 1.6},
     {key: 'shibor_on', name: '隔夜', col: '#8A93A3', w: 1.2, dash: '4 3'}
   ];
-  let vals = [];
-  for (const s of series) for (const r of rows) {
-    const v = r[s.key];
-    if (v !== null && v !== undefined && !isNaN(v)) vals.push(v);
-  }
-  if (!vals.length) return;
-  let mn = Infinity, mx = -Infinity;
-  for (const v of vals) { if (v < mn) mn = v; if (v > mx) mx = v; }
-  const pd0 = (mx - mn) * 0.2 || 0.05; mn -= pd0; mx += pd0;
-  const Y = v => Tp + (mx - v) / (mx - mn) * (H - B - Tp);
+  const svg = $('liqCnChart');
+  let GR = null;
 
-  let g = '';
-  for (let k = 0; k <= 4; k++) {
-    const y = Tp + k * (H - B - Tp) / 4, v = mx - (mx - mn) * k / 4;
-    g += '<line x1="' + Lf + '" y1="' + y + '" x2="' + (W - R) + '" y2="' + y + '" stroke="#2A2F39" stroke-width="1"/>'
-      + '<text x="' + (Lf - 8) + '" y="' + (y + 4) + '" fill="#8A93A3" font-size="10.5" text-anchor="end" '
-      + 'font-family="Consolas">' + v.toFixed(2) + '</text>';
-  }
-  for (const s of series) {
-    let d = '', on = false;
-    for (let i = 0; i < n; i++) {
+  function render(){
+    const n = view.i1 - view.i0 + 1;
+    const X = i => n > 1 ? Lf + (i - view.i0) * (W - Lf - R) / (n - 1) : (Lf + W - R) / 2;
+
+    let mn = Infinity, mx = -Infinity;
+    for (const s of series) for (let i = view.i0; i <= view.i1; i++) {
       const v = rows[i][s.key];
-      if (v === null || v === undefined || isNaN(v)) { on = false; continue; }
-      d += (on ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(v).toFixed(1) + ' ';
-      on = true;
+      if (v !== null && v !== undefined && !isNaN(v)) { if (v < mn) mn = v; if (v > mx) mx = v; }
     }
-    if (!d) continue;
-    g += '<path d="' + d + '" fill="none" stroke="' + s.col + '" stroke-width="' + s.w + '"'
-      + (s.dash ? ' stroke-dasharray="' + s.dash + '"' : '') + ' stroke-linejoin="round"/>';
-    const lr = rows[n - 1];
-    if (lr && lr[s.key] !== null && lr[s.key] !== undefined) {
-      g += '<circle cx="' + X(n - 1) + '" cy="' + Y(lr[s.key]) + '" r="3" fill="' + s.col + '"/>'
-        + '<text x="' + (X(n - 1) + 7) + '" y="' + (Y(lr[s.key]) + 4) + '" fill="' + s.col
-        + '" font-size="11" font-family="Consolas">' + s.name + '</text>';
+    if (!isFinite(mn)) { mn = 0; mx = 1; }
+    const pd0 = (mx - mn) * 0.2 || 0.05; mn -= pd0; mx += pd0;
+    const Y = v => Tp + (mx - v) / (mx - mn) * (H - B - Tp);
+
+    let imn = Infinity, imx = -Infinity;
+    if (baseIdx) for (let i = view.i0; i <= view.i1; i++) {
+      const v = idxMap[rows[i].date];
+      if (v !== null && v !== undefined && !isNaN(v)) { if (v < imn) imn = v; if (v > imx) imx = v; }
+    }
+    const hasIdx = !!baseIdx && isFinite(imn) && isFinite(imx);
+    if (hasIdx) { const p = (imx - imn) * 0.2 || 0.5; imn -= p; imx += p; }
+    const YI = v => Tp + (imx - v) / ((imx - imn) || 1) * (H - B - Tp);
+
+    let g = '';
+    for (let k = 0; k <= 4; k++) {
+      const y = Tp + k * (H - B - Tp) / 4;
+      g += '<line x1="' + Lf + '" y1="' + y + '" x2="' + (W - R) + '" y2="' + y + '" stroke="#2A2F39" stroke-width="1"/>';
+    }
+    let axL = '', axR = '';
+    for (let k = 0; k <= 4; k++) {
+      const f = k / 4, y = Tp + f * (H - B - Tp);
+      axL += '<text x="' + (Lf - 8) + '" y="' + (y + 4) + '" fill="#8A93A3" font-size="10.5" text-anchor="end" font-family="Consolas">'
+        + (mx - f * (mx - mn)).toFixed(2) + '</text>';
+      if (hasIdx) axR += '<text x="' + (W - R + 8) + '" y="' + (y + 4) + '" fill="#9B6BFF" font-size="10.5" font-family="Consolas">'
+        + (imx - f * (imx - imn)).toFixed(1) + '</text>';
+    }
+    let xt = '';
+    const NL = Math.min(7, n);
+    for (let k = 0; k < NL; k++) {
+      const i = view.i0 + Math.round(k * (n - 1) / ((NL - 1) || 1));
+      const isLast = (k === NL - 1);
+      const lab = n > 80 ? rows[i].date.slice(0, 7) : rows[i].date.slice(5);
+      xt += '<text x="' + (isLast ? (W - R) : X(i)) + '" y="' + (H - 8) + '" fill="#4a5160" font-size="10.5" '
+        + (isLast ? 'text-anchor="end"' : 'text-anchor="middle"') + ' font-family="Consolas">' + lab + '</text>';
+    }
+
+    let idxPath = '';
+    if (hasIdx) {
+      let d = '', on = false;
+      for (let i = view.i0; i <= view.i1; i++) {
+        const v = idxMap[rows[i].date];
+        if (v === null || v === undefined || isNaN(v)) { on = false; continue; }
+        d += (on ? 'L' : 'M') + X(i).toFixed(1) + ' ' + YI(v).toFixed(1) + ' ';
+        on = true;
+      }
+      if (d) idxPath = '<path d="' + d + '" fill="none" stroke="#9B6BFF" stroke-width="1.6" opacity="0.9" stroke-linejoin="round"/>';
+    }
+
+    let ratePaths = '';
+    for (const s of series) {
+      let d = '', on = false;
+      for (let i = view.i0; i <= view.i1; i++) {
+        const v = rows[i][s.key];
+        if (v === null || v === undefined || isNaN(v)) { on = false; continue; }
+        d += (on ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(v).toFixed(1) + ' ';
+        on = true;
+      }
+      if (!d) continue;
+      ratePaths += '<path d="' + d + '" fill="none" stroke="' + s.col + '" stroke-width="' + s.w + '"'
+        + (s.dash ? ' stroke-dasharray="' + s.dash + '"' : '') + ' stroke-linejoin="round"/>';
+    }
+
+    svg.innerHTML = g + axL + axR + idxPath + ratePaths + xt;
+    GR = {X: X, n: n};
+
+    const zr = $('liqCnRange');
+    if (zr) zr.textContent = '当前 ' + n + ' 个交易日：' + rows[view.i0].date + ' ~ ' + rows[view.i1].date + '（共 ' + N + ' 天）';
+    for (const b of $('liqCnBar').querySelectorAll('.zbtn')) {
+      const len = Number(b.dataset.len);
+      const on = len < 0 ? false : (len === 0 ? n === N : len === n);
+      b.classList.toggle('on', on);
     }
   }
-  g += '<text x="' + Lf + '" y="' + (H - 8) + '" fill="#6b7484" font-size="10.5" font-family="Consolas">' + esc(rows[0].date) + '</text>'
-    + '<text x="' + (W - R) + '" y="' + (H - 8) + '" fill="#6b7484" font-size="10.5" text-anchor="end" font-family="Consolas">' + esc(rows[n - 1].date) + '</text>';
-  $('liqCnChart').innerHTML = g;
+
+  function setLen(len){
+    if (len === -1) { view.i1 = N - 1; view.i0 = Math.max(0, N - 250); }
+    else if (len <= 0 || len >= N) { view.i0 = 0; view.i1 = N - 1; }
+    else { view.i1 = N - 1; view.i0 = Math.max(0, N - len); }
+    render();
+  }
+  for (const b of $('liqCnBar').querySelectorAll('.zbtn')) b.addEventListener('click', () => setLen(Number(b.dataset.len)));
+  attachZoom(svg, view, N, render, Lf, R);
+
+  svg.addEventListener('mousemove', ev => {
+    if (!GR) return;
+    const rc = svg.getBoundingClientRect();
+    const px = (ev.clientX - rc.left) / rc.width * 1000;
+    let i = view.i0 + Math.round((px - Lf) / Math.max(1, (W - Lf - R)) * (GR.n - 1));
+    i = Math.max(view.i0, Math.min(view.i1, i));
+    const r = rows[i];
+    let h = '<b>' + esc(r.date) + '</b>'
+      + '<div style="color:#FF8A1F">DR007 ' + (r.dr007 === null || r.dr007 === undefined ? '—' : fmt(r.dr007, 3) + '%') + '</div>'
+      + '<div style="color:#4C9AFF">SHIBOR 3M ' + (r.shibor_3m === null || r.shibor_3m === undefined ? '—' : fmt(r.shibor_3m, 3) + '%') + '</div>'
+      + '<div style="color:#8A93A3">隔夜 ' + (r.shibor_on === null || r.shibor_on === undefined ? '—' : fmt(r.shibor_on, 3) + '%') + '</div>';
+    if (baseIdx) {
+      const iv = idxMap[r.date];
+      h += '<div style="color:#9B6BFF">' + esc(idxName) + ' 归一 ' + (iv === null || iv === undefined ? '—' : iv.toFixed(1)) + '</div>';
+    }
+    const tip = $('liqCnTip');
+    tip.innerHTML = h; tip.style.display = 'block';
+    const br = $('liqCnPanel').getBoundingClientRect();
+    let lx = ev.clientX - br.left + 16;
+    if (lx + 200 > br.width) lx = ev.clientX - br.left - 196;
+    tip.style.left = lx + 'px';
+    tip.style.top = (ev.clientY - br.top + 14) + 'px';
+  });
+  svg.addEventListener('mouseleave', () => { $('liqCnTip').style.display = 'none'; });
+
+  render();
 })();
 
 /* ══════════ ⑩ 市场宽度 ══════════ */

@@ -83,7 +83,7 @@ def get_valuation(out):
 
 
 # ── 2. 境内资金面 ──────────────────────────────────────────────
-def get_liquidity(out, days=60):
+def get_liquidity(out, days=250):
     j = _get('/api/cn-liquidity', {'days': days})
     rows = j.get('data') or []
     if not rows:
