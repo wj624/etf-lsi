@@ -193,6 +193,15 @@ def lsi_block(L):
         fmt(d100(c.get('dfii10')), 2), fmt(d100(c.get('credit')), 2), sgn2(c.get('credit_roc'), 2))
     h += '<tr><td>10Y−2Y 利差</td><td>%s bp</td><td>T10YIE / CPI YoY</td><td>%s%% / %s%%</td></tr>' % (
         sgn2(c.get('yield_spread'), 1), fmt(d100(c.get('t10yie')), 2), fmt(d100(c.get('cpi_yoy')), 2))
+    # US02Y − EFFR：2 年期与当前政策利率的缺口 = 市场对未来加息/降息的定价。
+    # 两个字段都是 bp 口径（459 = 4.59%），直接相减，不要再 ×100。
+    _use = ((c.get('us02y') - c.get('effr'))
+            if (c.get('us02y') is not None and c.get('effr') is not None) else None)
+    h += ('<tr><td>US02Y − EFFR（加息/降息周期）</td>'
+          '<td colspan="3" style="color:%s"><b>%s bp</b>　US02Y %s%% − EFFR %s%%　→　%s</td></tr>'
+          % (col(_use), sgn2(_use, 1), fmt(d100(c.get('us02y')), 2), fmt(d100(c.get('effr')), 2),
+             ('2Y 高于政策利率，市场在定价<b>加息</b>' if (_use or 0) > 0 else
+              ('2Y 低于政策利率，市场在定价<b>降息</b>' if (_use or 0) < 0 else '与政策利率基本持平'))))
     h += '<tr><td>银行准备金</td><td>%s T（占GDP %s%% / 占银行资产 %s%%）</td><td>广义美元指数</td><td>%s（MA50 %s）</td></tr>' % (
         fmt(c['wrb_T'], 3), fmt(c['reserve_gdp'], 2), fmt(c['reserve_assets'], 2),
         fmt(c['dxy'], 2), fmt(c['dxy_ma'], 2))
