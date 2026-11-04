@@ -830,9 +830,10 @@ if (D.lsi) {
   const pad = (mxv - mnv) * 0.16 || 5;
   const mn = mnv - pad, mx = mxv + pad;
 
-  $('usGapH').innerHTML = '⑤-3 US02Y − EFFR 缺口 · 近 ' + n + ' 个交易日（' + esc(DD[0]) + ' ~ ' + esc(DD[n - 1]) + '）'
+  // 头文字刻意不写日期区间：横轴两端已经有，重复反而让窄屏折行时把最后几个字甩到下一行。
+  $('usGapH').innerHTML = '⑤-3 US02Y − EFFR 缺口 · 近 ' + n + ' 个交易日'
     + '　｜　<b style="color:#E8453C">上方＝定价加息</b> · <b style="color:#1FB37A">下方＝定价降息</b>'
-    + '　｜　区间 ' + mnv.toFixed(0) + ' ~ ' + mxv.toFixed(0) + ' bp（加息 ' + pos + ' 天 / 降息 ' + neg + ' 天）';
+    + '　｜　区间 ' + mnv.toFixed(0) + ' ~ ' + mxv.toFixed(0) + ' bp（加息 ' + pos + ' 天 · 降息 ' + neg + ' 天）';
 
   const W = 1000, H = 190, Lf = 58, Rr = 80, Tp = 16, B = 28;
   const X = function(i){ return Lf + i * (W - Lf - Rr) / Math.max(1, n - 1); };
