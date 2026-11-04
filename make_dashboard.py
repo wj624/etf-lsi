@@ -296,6 +296,10 @@ border-radius:10px;padding:12px 15px;margin-bottom:10px;font-size:12.8px;line-he
   <svg id="lsiChart" viewBox="0 0 1000 360"></svg>
   <div class="tip" id="lsiTip"></div>
   <div class="cards" id="lsiCards"></div>
+  <div id="usGapBox" style="display:none">
+    <div class="subh" id="usGapH"></div>
+    <svg id="usGapChart" viewBox="0 0 1000 190"></svg>
+  </div>
   <div id="flowBox"></div>
 </div>
 
@@ -800,6 +804,84 @@ if (D.lsi) {
     '<br><b>三渠道净流量：</b>'+esc(f.net_desc)+
     '<br>' + f.items.map(x=>esc(x.name)+' '+sign(x.delta_b,2)+'B').join('　｜　') + '</div>';
 }
+
+/* ---------- ⑤-3 US02Y − EFFR 缺口（近 250 个交易日） ---------- */
+(function renderUsGap(){
+  const L = D.lsi;
+  if (!L || !L.hist || !L.hist.us2_effr || !L.cal) return;
+  const cal = L.cal, ser = L.hist.us2_effr;
+  const len = Math.min(cal.length, ser.length);
+  const n = Math.min(250, len);
+  if (n < 20) return;
+  const i0 = len - n;
+  const V = [], DD = [];
+  for (let i = i0; i < i0 + n; i++) { DD.push(cal[i]); V.push(ser[i]); }
+  const vals = V.filter(function(v){ return v !== null && v !== undefined && !isNaN(v); });
+  if (vals.length < 10) return;
+  $('usGapBox').style.display = '';
+
+  let mnv = 0, mxv = 0, pos = 0, neg = 0;
+  for (const v of vals) {
+    if (v < mnv) mnv = v;
+    if (v > mxv) mxv = v;
+    if (v > 0) pos++; else if (v < 0) neg++;
+  }
+  const cur = vals[vals.length - 1];
+  const pad = (mxv - mnv) * 0.16 || 5;
+  const mn = mnv - pad, mx = mxv + pad;
+
+  $('usGapH').innerHTML = '⑤-3 US02Y − EFFR 缺口 · 近 ' + n + ' 个交易日（' + esc(DD[0]) + ' ~ ' + esc(DD[n - 1]) + '）'
+    + '　｜　<b style="color:#E8453C">上方＝定价加息</b> · <b style="color:#1FB37A">下方＝定价降息</b>'
+    + '　｜　区间 ' + mnv.toFixed(0) + ' ~ ' + mxv.toFixed(0) + ' bp（加息 ' + pos + ' 天 / 降息 ' + neg + ' 天）';
+
+  const W = 1000, H = 190, Lf = 58, Rr = 80, Tp = 16, B = 28;
+  const X = function(i){ return Lf + i * (W - Lf - Rr) / Math.max(1, n - 1); };
+  const Y = function(v){ return Tp + (mx - v) / (mx - mn) * (H - B - Tp); };
+
+  let g = '';
+  // 刻度用「整齐步长」而不是等分：等分会得到 130 / 72 / 14 / −44 这种读不出量级的数字。
+  const span = mx - mn;
+  const mag = Math.pow(10, Math.floor(Math.log10(span / 4 || 1)));
+  const nrm = (span / 4) / mag;
+  const step = (nrm <= 1 ? 1 : nrm <= 2 ? 2 : nrm <= 5 ? 5 : 10) * mag;
+  const ticks = [];
+  for (let t = Math.ceil(mn / step) * step; t <= mx + 1e-9; t += step) ticks.push(+t.toFixed(4));
+  const y0 = Y(0);
+  for (const tv of ticks) {
+    const isZero = Math.abs(tv) < 1e-9;
+    const yy = isZero ? y0 : Y(tv);
+    g += '<line x1="' + Lf + '" y1="' + yy.toFixed(1) + '" x2="' + (W - Rr) + '" y2="' + yy.toFixed(1)
+      + '" stroke="' + (isZero ? '#E8453C' : '#2A2F39') + '" stroke-width="1"'
+      + (isZero ? ' stroke-dasharray="4 4" opacity="0.85"' : '') + '/>'
+      + '<text x="' + (Lf - 8) + '" y="' + (yy + 4).toFixed(1) + '" fill="' + (isZero ? '#E8453C' : '#8A93A3')
+      + '" font-size="10.5" text-anchor="end" font-family="Consolas">' + (isZero ? '0' : tv.toFixed(0)) + '</text>';
+  }
+
+  let d = '', on = false;
+  for (let i = 0; i < n; i++) {
+    const v = V[i];
+    if (v === null || v === undefined || isNaN(v)) { on = false; continue; }
+    d += (on ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(v).toFixed(1) + ' ';
+    on = true;
+  }
+  // 同一条路径画两遍，用「零轴之上 / 之下」两个裁剪区分别着色：
+  // 上方红＝定价加息、下方绿＝定价降息，比单色线更能一眼看出周期切换。
+  const y0c = Math.max(0, y0).toFixed(1);
+  g += '<defs><clipPath id="ugTop"><rect x="0" y="0" width="' + W + '" height="' + y0c + '"/></clipPath>'
+    + '<clipPath id="ugBot"><rect x="0" y="' + y0c + '" width="' + W + '" height="'
+    + Math.max(0, H - y0).toFixed(1) + '"/></clipPath></defs>'
+    + '<path d="' + d + '" fill="none" stroke="#E8453C" stroke-width="1.9" stroke-linejoin="round" clip-path="url(#ugTop)"/>'
+    + '<path d="' + d + '" fill="none" stroke="#1FB37A" stroke-width="1.9" stroke-linejoin="round" clip-path="url(#ugBot)"/>';
+
+  const col = cur >= 0 ? '#E8453C' : '#1FB37A';
+  g += '<circle cx="' + X(n - 1).toFixed(1) + '" cy="' + Y(cur).toFixed(1) + '" r="3.2" fill="' + col + '"/>'
+    + '<text x="' + (X(n - 1) + 8).toFixed(1) + '" y="' + (Y(cur) + 4).toFixed(1) + '" fill="' + col
+    + '" font-size="11" font-family="Consolas">' + (cur > 0 ? '+' : '') + cur.toFixed(1) + ' bp</text>'
+    + '<text x="' + Lf + '" y="' + (H - 7) + '" fill="#6b7484" font-size="10.5" font-family="Consolas">' + esc(DD[0]) + '</text>'
+    + '<text x="' + (W - Rr) + '" y="' + (H - 7) + '" fill="#6b7484" font-size="10.5" text-anchor="end" '
+    + 'font-family="Consolas">' + esc(DD[n - 1]) + '</text>';
+  $('usGapChart').innerHTML = g;
+})();
 
 /* ---------- 20 项报警明细表 ---------- */
 if (D.lsi && D.lsi.alerts) {
