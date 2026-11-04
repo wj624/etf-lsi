@@ -126,7 +126,7 @@ def main():
     if S:
         # 只做「有就传、没有就整块不出现」的处理：任一子项缺失都不影响其它面板。
         sig = {'updated': S.get('updated', '')}
-        for k in ('valuation', 'liquidity', 'premium', 'breadth'):
+        for k in ('valuation', 'liquidity', 'premium', 'breadth', 'rates'):
             if S.get(k):
                 sig[k] = S[k]
         if S.get('errors'):
@@ -237,6 +237,7 @@ background:linear-gradient(90deg,#1FB37A 0%,#5FA83A 30%,#C9A227 55%,#E0713C 78%,
 .ptrack .zero{position:absolute;top:0;bottom:0;width:1px;background:#3a4150}
 .ptrack .fill{position:absolute;top:2px;bottom:2px;border-radius:3px}
 .prow .vv{text-align:right;font-family:Consolas,monospace;font-weight:600}
+.subh{color:var(--sub);font-size:12px;font-weight:600;margin:14px 0 4px}
 
 .diag{background:var(--panel2);border:1px solid var(--grid);border-left:3px solid var(--cyan);
 border-radius:10px;padding:12px 15px;margin-bottom:10px;font-size:12.8px;line-height:1.9;white-space:pre-wrap}
@@ -338,6 +339,16 @@ border-radius:10px;padding:12px 15px;margin-bottom:10px;font-size:12.8px;line-he
   <h2>⑫ ETF 折溢价（二级市场价 vs 单位净值）</h2>
   <div class="hint" id="premHint"></div>
   <div id="premBox"></div>
+</div>
+
+<div class="panel" id="ratesPanel" style="display:none">
+  <h2>⑬ 国债收益率曲线与期限利差（无风险利率 · 数据源：东财）</h2>
+  <div class="hint" id="ratesHint"></div>
+  <div class="cards" id="ratesCards"></div>
+  <div class="subh">曲线形态：当期 vs 60 日前 vs 250 日前</div>
+  <svg id="ratesCurve" viewBox="0 0 1000 300"></svg>
+  <div class="subh">10Y − 2Y 期限利差（bp，负值＝倒挂）</div>
+  <svg id="ratesSpread" viewBox="0 0 1000 170"></svg>
 </div>
 
 <div id="shareBlocks"></div>
@@ -1090,6 +1101,161 @@ $('shareBlocks').innerHTML = sh;
   const nm = {}; for (const r of rows) nm[r.code] = r.name;
   h += '<div class="foot" style="margin-top:8px">' + rows.map(r => esc(r.code) + ' ' + esc(nm[r.code] || '')).join('　｜　') + '</div>';
   $('premBox').innerHTML = h;
+})();
+
+/* ══════════ ⑬ 国债收益率曲线 ══════════ */
+(function renderRates(){
+  const S = D.signals;
+  if (!S || !S.rates) return;
+  const R = S.rates;
+  const rows = (R.data || []).filter(r => r && r.date);
+  if (rows.length < 5) return;
+  $('ratesPanel').style.display = '';
+
+  const lt = R.latest || {}, dv = R.derived || {};
+  const n = rows.length;
+  const pp = v => (v === null || v === undefined) ? '—' : Number(v).toFixed(3) + '%';
+  const bp = v => (v === null || v === undefined) ? '—' : (v > 0 ? '+' : '') + Number(v).toFixed(1) + ' bp';
+  // 利率上行＝无风险利率走高＝对权益估值不利，按 A 股习惯标红；下行标绿
+  const bpc = v => (v === null || v === undefined) ? 'var(--sub)' : (v > 0 ? 'var(--up)' : (v < 0 ? 'var(--down)' : 'var(--txt)'));
+
+  const inverted = dv.inverted === true;
+  $('ratesHint').innerHTML = '国债到期收益率是<b>无风险利率</b>，整条曲线同时隐含增长与通胀预期。'
+    + '与 ⑨ 的区别：⑨ 看的是银行间<b>资金价格</b>（DR007/SHIBOR，短端、政策驱动，回答「钱紧不紧」），'
+    + '本节看的是<b>债券收益率曲线</b>（回答「钱贵不贵」）——算股债性价比时分母用的就是 10Y 国债。'
+    + '<b>10Y−2Y 为负＝倒挂</b>，历史上极少见，通常意味着市场在定价强宽松；'
+    + '利差走阔多对应宽松预期升温，走平则偏谨慎。'
+    + (inverted ? '　<span style="color:var(--up)">当前 10Y−2Y 已倒挂。</span>' : '')
+    + '　数据源：东财 datacenter（国债到期收益率）。';
+
+  // ── 卡片 ──
+  let ch = '';
+  const ma = dv.cn_10y_ma20;
+  const dev = (lt.cn_10y !== null && lt.cn_10y !== undefined && ma !== null && ma !== undefined)
+    ? (lt.cn_10y - ma) * 100 : null;
+  ch += '<div class="card"><div class="k">10Y 国债 · 无风险利率基准</div>'
+    + '<div class="v" style="color:var(--orange)">' + pp(lt.cn_10y) + '</div>'
+    + '<div class="d">20 日均 ' + (ma === null || ma === undefined ? '—' : Number(ma).toFixed(3) + '%')
+    + '｜偏离 <span style="color:' + bpc(dev) + '">' + bp(dev) + '</span></div></div>';
+  ch += '<div class="card"><div class="k">2Y 国债 · 短端（贴政策利率）</div>'
+    + '<div class="v" style="color:var(--cyan)">' + pp(lt.cn_2y) + '</div>'
+    + '<div class="d">5Y ' + pp(lt.cn_5y) + '｜5Y−2Y ' + bp(lt.cn_5y_2y === null || lt.cn_5y_2y === undefined ? null : lt.cn_5y_2y * 100) + '</div></div>';
+  ch += '<div class="card"><div class="k">30Y 国债 · 长端（含增长预期）</div>'
+    + '<div class="v" style="color:var(--blue)">' + pp(lt.cn_30y) + '</div>'
+    + '<div class="d">30Y−10Y ' + bp(lt.cn_30y_10y === null || lt.cn_30y_10y === undefined ? null : lt.cn_30y_10y * 100)
+    + '｜10Y 近20日 <span style="color:' + bpc(dv.cn_10y_chg_20d_bp) + '">' + bp(dv.cn_10y_chg_20d_bp) + '</span></div></div>';
+  ch += '<div class="card"><div class="k">10Y − 2Y 期限利差</div>'
+    + '<div class="v" style="color:' + (inverted ? 'var(--up)' : 'var(--txt)') + '">'
+    + bp(lt.cn_10y_2y === null || lt.cn_10y_2y === undefined ? null : lt.cn_10y_2y * 100) + '</div>'
+    + '<div class="d">' + (inverted ? '倒挂（10Y &lt; 2Y）' : (lt.cn_10y_2y > 0.005 ? '正常陡峭' : '平坦'))
+    + '｜近 20 日 <span style="color:' + bpc(dv.cn_10y_2y_chg_20d_bp) + '">' + bp(dv.cn_10y_2y_chg_20d_bp) + '</span></div></div>';
+  $('ratesCards').innerHTML = ch;
+
+  // ── 曲线形态：当期 vs 60 日前 vs 250 日前 ──
+  const TEN = [['2Y', 'cn_2y'], ['5Y', 'cn_5y'], ['10Y', 'cn_10y'], ['30Y', 'cn_30y']];
+  const snaps = [
+    {i: n - 1, name: '当期', col: '#FF8A1F', w: 2.6, dash: ''},
+    {i: Math.max(0, n - 61), name: '60 日前', col: '#4C9AFF', w: 1.6, dash: '5 4'},
+    {i: 0, name: '250 日前', col: '#8A93A3', w: 1.4, dash: '2 4'}
+  ];
+  let vals = [];
+  for (const s of snaps) {
+    const r = rows[s.i];
+    if (!r) continue;
+    for (const [, k] of TEN) if (r[k] !== null && r[k] !== undefined) vals.push(r[k]);
+  }
+  if (vals.length) {
+    const W = 1000, H = 300, Lf = 62, Rr = 96, Tp = 22, B = 36;
+    let mn = Math.min(...vals), mx = Math.max(...vals);
+    const pd = (mx - mn) * 0.22 || 0.05; mn -= pd; mx += pd;
+    const x = i => Lf + i * (W - Lf - Rr) / (TEN.length - 1);
+    const y = v => Tp + (mx - v) / (mx - mn) * (H - B - Tp);
+
+    let g = '';
+    for (let k = 0; k <= 4; k++) {
+      const yy = Tp + k * (H - B - Tp) / 4, vv = mx - (mx - mn) * k / 4;
+      g += '<line x1="' + Lf + '" y1="' + yy + '" x2="' + (W - Rr) + '" y2="' + yy + '" stroke="#2A2F39" stroke-width="1"/>'
+        + '<text x="' + (Lf - 8) + '" y="' + (yy + 4) + '" fill="#8A93A3" font-size="10.5" text-anchor="end" '
+        + 'font-family="Consolas">' + vv.toFixed(2) + '%</text>';
+    }
+    // 横轴期限标签
+    for (let i = 0; i < TEN.length; i++) {
+      g += '<text x="' + x(i) + '" y="' + (H - 12) + '" fill="#8A93A3" font-size="11.5" text-anchor="middle" '
+        + 'font-family="Consolas">' + TEN[i][0] + '</text>';
+    }
+    const labels = [];
+    for (const s of snaps) {
+      const r = rows[s.i];
+      if (!r) continue;
+      let d = '', on = false, lastX = 0, lastY = 0;
+      for (let i = 0; i < TEN.length; i++) {
+        const v = r[TEN[i][1]];
+        if (v === null || v === undefined) { on = false; continue; }
+        d += (on ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(v).toFixed(1) + ' ';
+        on = true; lastX = x(i); lastY = y(v);
+      }
+      if (!d) continue;
+      g += '<path d="' + d + '" fill="none" stroke="' + s.col + '" stroke-width="' + s.w + '"'
+        + (s.dash ? ' stroke-dasharray="' + s.dash + '"' : '') + ' stroke-linejoin="round"/>';
+      for (let i = 0; i < TEN.length; i++) {
+        const v = r[TEN[i][1]];
+        if (v === null || v === undefined) continue;
+        g += '<circle cx="' + x(i) + '" cy="' + y(v) + '" r="' + (s.name === '当期' ? 3.6 : 2.2) + '" fill="' + s.col + '"/>';
+      }
+      labels.push({x: lastX + 9, y: lastY + 4, col: s.col, txt: s.name + ' ' + String(r.date).slice(5)});
+    }
+    // 三条曲线的末端可能落在非常接近的高度上（尤其 30Y 附近），
+    // 直接按各自 y 写标签会糊成一团。这里按 y 排序后强制拉开 13px 最小间距。
+    labels.sort((a, b) => a.y - b.y);
+    for (let i = 1; i < labels.length; i++) {
+      if (labels[i].y - labels[i - 1].y < 13) labels[i].y = labels[i - 1].y + 13;
+    }
+    for (const L of labels) {
+      g += '<text x="' + L.x.toFixed(1) + '" y="' + L.y.toFixed(1) + '" fill="' + L.col + '" font-size="10.5" '
+        + 'font-family="Consolas">' + esc(L.txt) + '</text>';
+    }
+    $('ratesCurve').innerHTML = g;
+  }
+
+  // ── 10Y−2Y 利差历史 ──
+  const sp = rows.map(r => (r.cn_10y_2y === null || r.cn_10y_2y === undefined) ? null : r.cn_10y_2y * 100);
+  const sv = sp.filter(v => v !== null);
+  if (sv.length >= 5) {
+    const W = 1000, H = 170, Lf = 62, Rr = 30, Tp = 14, B = 26;
+    let mn = Math.min(0, ...sv), mx = Math.max(0, ...sv);
+    const pd = (mx - mn) * 0.18 || 1; mn -= pd; mx += pd;
+    const X = i => Lf + i * (W - Lf - Rr) / Math.max(1, n - 1);
+    const Y = v => Tp + (mx - v) / (mx - mn) * (H - B - Tp);
+    let g = '';
+    for (let k = 0; k <= 3; k++) {
+      const yy = Tp + k * (H - B - Tp) / 3, vv = mx - (mx - mn) * k / 3;
+      g += '<line x1="' + Lf + '" y1="' + yy + '" x2="' + (W - Rr) + '" y2="' + yy + '" stroke="#2A2F39" stroke-width="1"/>'
+        + '<text x="' + (Lf - 8) + '" y="' + (yy + 4) + '" fill="#8A93A3" font-size="10.5" text-anchor="end" '
+        + 'font-family="Consolas">' + vv.toFixed(0) + '</text>';
+    }
+    // 零轴：倒挂的分界
+    g += '<line x1="' + Lf + '" y1="' + Y(0) + '" x2="' + (W - Rr) + '" y2="' + Y(0) + '" stroke="#E8453C" '
+      + 'stroke-width="1" stroke-dasharray="4 4" opacity="0.75"/>'
+      + '<text x="' + (W - Rr + 3) + '" y="' + (Y(0) + 4) + '" fill="#E8453C" font-size="10" font-family="Consolas">0</text>';
+    let d = '', on = false;
+    for (let i = 0; i < n; i++) {
+      const v = sp[i];
+      if (v === null) { on = false; continue; }
+      d += (on ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(v).toFixed(1) + ' ';
+      on = true;
+    }
+    g += '<path d="' + d + '" fill="none" stroke="#FF8A1F" stroke-width="1.9" stroke-linejoin="round"/>';
+    const lv = sv[sv.length - 1];
+    g += '<circle cx="' + X(n - 1) + '" cy="' + Y(lv) + '" r="3.2" fill="#FF8A1F"/>'
+      + '<text x="' + (X(n - 1) - 6) + '" y="' + (Y(lv) - 8) + '" fill="#FF8A1F" font-size="11" '
+      + 'text-anchor="end" font-family="Consolas">' + lv.toFixed(1) + ' bp</text>'
+      + '<text x="' + Lf + '" y="' + (H - 7) + '" fill="#6b7484" font-size="10.5" font-family="Consolas">' + esc(rows[0].date) + '</text>'
+      + '<text x="' + (W - Rr) + '" y="' + (H - 7) + '" fill="#6b7484" font-size="10.5" text-anchor="end" font-family="Consolas">'
+      + esc(rows[n - 1].date) + '</text>';
+    $('ratesSpread').innerHTML = g;
+  } else {
+    $('ratesSpread').style.display = 'none';
+  }
 })();
 
 /* ---------- 页脚 ---------- */
