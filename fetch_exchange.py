@@ -251,15 +251,23 @@ def fetch_sse(date_compact):
       1. 自建 Worker（Cloudflare 出口，绕开 runner IP 被限流的老问题）
       2. 直连 query.sse.com.cn（同源、自带 timeout）
       3. 熔断跳过 —— 两个通道连续失败达阈值时直接放弃，避免整轮回填卡死
-    空表（接口正常但当天无数据）不算失败，返回 {}。
+
+    「空表」的判定是不对称的：Worker 回空表一律当可疑、必须由直连复核（它会吞错并缓存空值）；
+    直连回空表才认作「当天确实没有数据」（比如当天收盘后尚未披露），返回 {} 且不算失败。
     """
     if _BREAKER.tripped:
         raise RuntimeError('接口熔断中，本轮跳过')
     err1 = None
     try:
         out = _sse_via_worker(date_compact)
-        _BREAKER.ok()
-        return out
+        if out:
+            _BREAKER.ok()
+            return out
+        # 空表绝不能当成「当天无数据」直接收下：Worker 会把上游失败吞成 200 + data:[]，
+        # 而且会把空结果写进 KV 缓存（1h）。2026-11-04 实测 9 天里有 5 天是这种「假空」，
+        # 静默丢一天比报错更危险 —— 必须用直连再核对一次。
+        err1 = RuntimeError('Worker 返回空表')
+        print('  ~ sse %s Worker 返回空表，改直连核对' % date_compact, flush=True)
     except Exception as e1:
         # 注意：except 子句里的 e1 出了块就会被释放，必须先另存一份给下面拼接报错用
         err1 = e1
