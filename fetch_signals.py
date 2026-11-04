@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""抓取「市场环境」四件套：指数估值 / 境内资金面 / ETF 折溢价 / 市场宽度。
+"""抓取「市场环境」五件套：指数估值 / 境内资金面 / ETF 折溢价 / 市场宽度 / 国债曲线。
 
-这四个端点都是 2026-11 新加到 a-stock-api Worker 的，**彼此完全独立**：
+这五个端点都是 2026-11 加（或改造）到 a-stock-api Worker 的，**彼此完全独立**：
 任何一个失败都只让对应面板消失，不影响主看板、ETF 背离、宏观 LSI。
 
 设计原则（与 fetch_exchange.py 一致）：
@@ -169,17 +169,47 @@ def get_breadth(out):
              len(rows)), flush=True)
 
 
+# ── 5. 国债收益率曲线（尾部窗口，派生期限利差） ────────────────
+def get_rates(out, days=250):
+    """无风险利率曲线。
+
+    与 ⑨ 的 DR007/SHIBOR 是两回事：那两个是「银行间资金价格」（短端、政策驱动），
+    这里是「国债到期收益率」（整条曲线、含增长与通胀预期）。
+    股债性价比真正该比的分子/分母里，分母用的是 10Y 国债，不是 DR007。
+    """
+    j = _get('/api/cn-rates', {'days': days})
+    rows = j.get('data') or []
+    if not rows:
+        raise RuntimeError('国债曲线返回空表')
+    out['rates'] = {
+        'unit': j.get('unit') or '%',
+        'fields': j.get('fields') or {},
+        'note': j.get('note') or '',
+        'latest': j.get('latest') or {},
+        'derived': j.get('derived') or {},
+        'data': rows,
+    }
+    if j.get('upstream_error'):
+        warn('国债曲线部分失败: %s' % j['upstream_error'])
+    lt = out['rates']['latest']
+    b = lambda v: '—' if v is None else '%+.1f' % (v * 100)
+    print('  国债: %s  2Y=%s%% 10Y=%s%% 30Y=%s%%  10Y-2Y=%s bp（%d 条）'
+          % (lt.get('date'), lt.get('cn_2y'), lt.get('cn_10y'), lt.get('cn_30y'),
+             b(lt.get('cn_10y_2y')), len(rows)), flush=True)
+
+
 STEPS = [
     ('valuation', '指数估值', get_valuation),
     ('liquidity', '境内资金面', get_liquidity),
     ('premium', 'ETF 折溢价', get_premium),
     ('breadth', '市场宽度', get_breadth),
+    ('rates', '国债曲线', get_rates),
 ]
 
 
 def main():
     out = {'updated': now_bj(), 'source': API_BASE, 'errors': []}
-    print('== 抓取市场环境四件套 ==', flush=True)
+    print('== 抓取市场环境五件套 ==', flush=True)
     for key, label, fn in STEPS:
         try:
             fn(out)
@@ -188,7 +218,7 @@ def main():
             out['errors'].append(msg)
             warn(msg)
     # 全部失败时不写文件，避免把上一份完整数据覆盖成空壳
-    if not any(k in out for k in ('valuation', 'liquidity', 'premium', 'breadth')):
+    if not any(k in out for k in ('valuation', 'liquidity', 'premium', 'breadth', 'rates')):
         print('!! 四项全失败，保留上一份 signals.json 不动', flush=True)
         return 1
     with open(OUT, 'w', encoding='utf-8') as f:
