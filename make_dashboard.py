@@ -352,9 +352,9 @@ border-radius:10px;padding:12px 15px;margin-bottom:10px;font-size:12.8px;line-he
   <h2>⑬ 国债收益率曲线与期限利差（无风险利率 · 数据源：东财）</h2>
   <div class="hint" id="ratesHint"></div>
   <div class="cards" id="ratesCards"></div>
-  <div class="subh">曲线形态：当期 vs 60 日前 vs 250 日前</div>
+  <div class="subh">曲线形态（横轴＝期限 2Y / 5Y / 10Y / 30Y）：同一条收益率曲线在三个日期的三张快照</div>
   <svg id="ratesCurve" viewBox="0 0 1000 300"></svg>
-  <div class="subh">10Y − 2Y 期限利差（bp，负值＝倒挂）</div>
+  <div class="subh">10Y − 2Y 期限利差（横轴＝交易日）：上图每条线的 2Y→10Y 落差＝这条曲线上的一个点　｜　单位 bp，负值＝倒挂</div>
   <svg id="ratesSpread" viewBox="0 0 1000 170"></svg>
 </div>
 
@@ -1217,6 +1217,9 @@ $('shareBlocks').innerHTML = sh;
     + '本节看的是<b>债券收益率曲线</b>（回答「钱贵不贵」）——算股债性价比时分母用的就是 10Y 国债。'
     + '<b>10Y−2Y 为负＝倒挂</b>，历史上极少见，通常意味着市场在定价强宽松；'
     + '利差走阔多对应宽松预期升温，走平则偏谨慎。'
+    + '<br><b>本面板两张图的横轴不同</b>：上图是<b>期限</b>（2Y→30Y），三条线是同一条曲线在三个日期的三张快照；'
+    + '下图是<b>交易日</b>，把 10Y−2Y 利差逐日连成一条线。'
+    + '上图每条线上「10Y 比 2Y 高多少」，就是下图在那一天的一个点 —— 下图画的是上图的斜率，不是另一个指标。'
     + (inverted ? '　<span style="color:var(--up)">当前 10Y−2Y 已倒挂。</span>' : '')
     + '　数据源：东财 datacenter（国债到期收益率）。';
 
@@ -1248,7 +1251,7 @@ $('shareBlocks').innerHTML = sh;
   const snaps = [
     {i: n - 1, name: '当期', col: '#FF8A1F', w: 2.6, dash: ''},
     {i: Math.max(0, n - 61), name: '60 日前', col: '#4C9AFF', w: 1.6, dash: '5 4'},
-    {i: 0, name: '250 日前', col: '#8A93A3', w: 1.4, dash: '2 4'}
+    {i: 0, name: '约一年前', col: '#8A93A3', w: 1.4, dash: '2 4'}
   ];
   let vals = [];
   for (const s of snaps) {
