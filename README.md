@@ -749,6 +749,160 @@ python send_mail.py
 
 ---
 
+## 十二、给 AI 的维护提示词
+
+> 这一章是写给「下一次接手这个仓库的 AI」的操作手册。人类读者可以跳过；但如果你的任务涉及改代码、
+> 修数据、换标的、加面板，**请先读完 12.1～12.4 再动手**，12.5 是可整段复制给 AI 的提示词。
+
+### 12.1 仓库速览：哪个文件能改、改了会炸什么
+
+| 文件 | 职责 | 改之前必须知道 |
+| :--- | :--- | :--- |
+| `config.py` | 全部口径与常量：`TRACKS`（4+4 只 ETF、指数代码、文案）、`RATIO_PAIRS`、`FRED_SERIES`、`LSI_TH`、配色（红涨绿跌） | **单一事实源**。改标的、改阈值、改文案都只在这里改；`ORDER = ['hs300','cyb']` 决定渲染顺序，别乱动 |
+| `fetch_exchange.py` | A 股链路取数：沪份额（Worker→直连）、深份额（xlsx）、净值（Worker→东财）、交易日历（Worker） | 这是 2026-11 迁移**唯一**改过的文件。它只消费 Worker 的 HTTP 契约，不依赖 akshare |
+| `fetch_data.py` | ETF 行情 / 市值 / 周K，维护 `raw_data.json`、`ratios.json` 滚动缓存 | 缓存窗口裁剪在这里；写回前会丢弃 `ETF_DAYS` 之外的旧日期 |
+| `fetch_fred_lsi.py` | 宏观 20+ 条 FRED 序列 → LSI、报警、`lsi.json`、`lsi_status.json` | **宏观链路，禁止顺手改**（除非任务明确要求动宏观）。改坏了看板整块变 null，而退出码仍是 0 |
+| `common.py` | FRED 请求封装 `http_json(url, csv_id=…)`，JSON 挂自动走 CSV | `csv_id` 参数**不能省**，省了就等于放弃第二条通道（见铁律 7） |
+| `make_dashboard.py` | 手写 SVG 渲染整张看板（无图表库，0 依赖） | 所有动态内容由 JS 渲染，不存在占位符子串覆盖问题（见铁律 5） |
+| `render.py` / `analyze_report.py` / `send_mail.py` | PNG 渲染 / 六步指标计算与五档判定 / 邮件组装发送 | 邮件用 `%+.1f`，**别再手动拼接 `+`**（会出 `++12.7`） |
+| `check_lsi_status.py` | **数据完整性闸门**，读 `lsi_status.json`，空序列/兜底异常就非 0 退出 | 工作流最后一步跑它，故意放在「发看板 / 上传 artifact」之后，让当天仍能拿到降级看板 |
+| `daily_run.py` | 本地一键跑全流程 | — |
+| `.github/workflows/daily.yml` | 调度 + 发布 + 闸门 | `cron: "17 13 * * 1-5"`（北京 21:17）有原因，见 12.3 第 5 条 |
+| `_exchange_shares.json` | 沪市份额缓存（约 260 天，600 KB 上下），**随仓库提交** | 它是「取不到时的真实兜底」，删了就等于把一次限流放大成数据空洞 |
+| `westock-data/` | 腾讯自选股 Node CLI，仅作滞后快照源 | 需要 `node 20`，工作流已配 |
+
+### 12.2 两条链路的边界（最容易越界的地方）
+
+```
+宏观（境外）  fetch_fred_lsi.py ─┐
+                                  ├─ common.py ── FRED API ── 需 FRED_API_KEY
+                                  ┘   ← 2026-11 迁移「一行未改」
+
+A 股（境内）  fetch_exchange.py ── a-stock-api Worker ──┬─ query.sse.com.cn
+                               └─ 直连兜底 ─────────────┴─ www.szse.cn / fund.eastmoney.com
+                                   ← 迁移只动了这半
+```
+
+- **改 A 股部分**：不要碰 `fetch_fred_lsi.py` / `common.py`。
+- **改宏观部分**：更不要顺手去动 Worker，那是另一个仓库（`wj624/a-stock-api`）的事。
+- **Worker 挂了怎么办**：先去看 [`a-stock-api` 的 README](https://github.com/wj624/a-stock-api/blob/main/README.md)，
+  里面有上游映射表、Runbook 和一份可直接复制给 AI 的同步提示词。
+  只要 `/api/etf-shares`、`/api/fund-nav`、`/api/trade-calendar` 的**字段名与单位**不变，**本仓库一行都不用改**。
+
+### 12.3 五个必踩坑（按踩坑频率排序）
+
+1. **「200 + 空数组」不等于「当天没数据」**（2026-11 的真实事故）
+   Worker 曾把上游失败吞成 `200 + {"data":[],"count":0}` 并写进 KV 缓存一小时，客户端把空表当「当天无披露」直接跳过，
+   于是 9 天里静默丢了 5 天，日志仍然是一片绿。现在的正确写法在 `fetch_sse()` 里：
+   ```python
+   try:
+       out = _sse_via_worker(date_compact)
+       if out:
+           _BREAKER.ok(); return out
+       err1 = RuntimeError('Worker 返回空表')      # 空表 → 当作失败，改直连复核
+   except Exception as e1:
+       err1 = e1
+   ```
+   **只有「直连也是空」才算真的没有数据。** 任何新加的接口调用都要照这个模式写。
+2. **单位：沪市 ×10000，深市不乘**
+   上交所原始字段 `TOT_VOL` 是**万份**，`× 10000` 才是「份」；深交所 xlsx 的 `基金规模(份)` **本身已是份**，再乘就是 10000 倍错误。
+   两条路径都统一 `round(..., 2)`，抹掉 `万份 × 1e4` 产生的 `…99.99999` 浮点噪声，
+   否则 600 KB 的份额缓存每天都会出现「值没变但末位抖了」的无意义 diff。
+   验证锚点：`510300` 在 2026-11-03 应为 `44,587,387,700` 份。
+3. **`IORB` 必须同时「在 `FRED_SERIES` 里」和「在 `_CAL_EXCLUDE` 里」**
+   `LSI = (SOFR − RRP) + (EFFR − IORB)`，删了就少一项；但它是政策利率，FRED 会预填未来日期且含周末行，
+   一旦参与构造交易日历，`lsi.asof` 就会被顶到明天（真实事故：A 股口径 `asof=2026-10-30`、宏观口径 `asof=2026-11-02`）。
+   **两个位置要求正好相反，看到一处不要就动手。**
+4. **缓存策略是设计，不是随手**
+   - `lsi.json` **故意不缓存**：宏观数据必须每天新算。缓存了，FRED 一失败就拿旧文件顶上，把陈旧数据当当日结果发出去。不缓存时宏观失败会让看板隐藏该块——这更诚实。
+   - `_exchange_shares.json` **必须随仓库提交**（不走 `actions/cache`，那份缓存 7 天不用会被清掉，届时又要全量重抓 250 天）。
+   - `raw_data.json` / `ratios.json` 走 `actions/cache`，写回前按 `ETF_DAYS`（默认 1250）裁剪窗口，体积恒定 1.6 MB，**不会越长越胖**。
+   - 每次运行强制重抓最后 **8 个交易日**（份额 T+1~T+2 披露，要回填）。
+5. **`cron` 是 21:17 而不是 19:00，`timeout` 是 45 而不是 55**
+   纽约联储每天美东 08:00 才公布当日 SOFR / EFFR / IORB，换北京时间是夏令时 20:00 / 冬令时 21:00；
+   19:00 跑只能拿到前一天的旧利率。21:17 在两种时制下都晚于美东 08:00，也晚于沪深晚间披露。
+   一天只跑一次（避免两封邮件），当天补跑用 `workflow_dispatch`。
+   超时 45 分钟是迁移 Worker 之后重算的：250 天回填从「分钟级 + 高失败率」变成「秒级」，依赖从 akshare（连带 pandas）瘦到 4 个包。
+
+**可调旋钮（全部走环境变量，代码里有默认值，一般不用改）**
+
+| 变量 | 默认 | 作用 |
+| :--- | :---: | :--- |
+| `ETF_API_BASE` | `https://a-stock-api.wj4020410.workers.dev` | Worker 地址；换域名只改这里 |
+| `ETF_API_TIMEOUT` | `30` | Worker 单次请求超时（秒） |
+| `ETF_EXCHANGE_DAYS` | `250` | 份额缓存窗口（交易日） |
+| `ETF_EXCHANGE_TAIL` | `10` | 尾部强制重抓天数 |
+| `ETF_SSE_WORKERS` | `4` | 第 1 轮并发线程数 |
+| `ETF_MAX_SSE_CALLS` | `320` | 单轮沪市请求上限（防失控） |
+| `ETF_SSE_RETRY` | `3` | 单日重试次数 |
+| `ETF_SSE_BREAKER` | `12` | 连续失败多少天触发熔断 |
+| `ETF_SZSE_CHUNK` | `20` | 深交所 xlsx 每次请求的日期跨度 |
+| `ETF_DAYS` | `1250` | `raw_data.json` 滚动窗口（交易日） |
+| `FRED_API_KEY` | 空 | **必填**，空则宏观模块自动降级、其余正常 |
+
+### 12.4 四类常见任务的 SOP
+
+**A. 上游 / Worker 变了，本仓库要不要改？**
+① 先读 `a-stock-api` 的 README 与 `/api/etf-shares` 契约；② 拿一个已知日期核对字段名与单位（`unit` 字段写着 `shares_10k = 万份`）；
+③ 单位或字段名变了 → 只改 `fetch_exchange.py` 的 `_sse_via_worker` / `_nav_via_em_direct`；④ **不要**在这里重新引入 akshare。
+验证：本地 `python fetch_exchange.py`，再用 `python -c` 读 `_exchange_shares.json` 对比 `510300` 的值。
+
+**B. 换标的 / 加一只 ETF**
+只改 `config.py` 的 `TRACKS[...]['etfs' | 'etf_list' | 'labels']`，`etf_list` 与 `etfs` 必须**同步**（前者带显示用纯数字代码）。
+`out_prefix` 决定产物文件名，改名会让历史缓存对不上，**非必要不改**。
+验证：跑一轮，确认新代码在 `_exchange_shares.json` 里有值，且看板「近 5 日份额明细」行数正确。
+
+**C. 份额有缺口（`meta.sse_failed_dates` 非空 / `sse_breaker_tripped: true`）**
+① 看是「Worker 通道挂」还是「两条都挂」——日志里 `~ sse ... Worker 返回空表，改直连核对` 是前者；
+② 缺口不是永久的：下一轮 `pick_todo()` 会把「窗口内缺失日期 + 尾部 10 天」全部重抓，通常第二天自愈；
+③ 如果连续多天都缺，去查 Worker（`a-stock-api` README §10 排障手册），**不要**在客户端加「用前一日份额顶替」的兜底——
+份额每天在变，顶上去就是假数据。
+
+**D. Action 红了怎么读**
+先看**最后一步**是不是 `Check LSI data completeness`——它红了说明数据缺项（看板已发出，但内容降级），
+去看 `lsi_status.json` 里的空序列清单，再看 FRED 是不是挂了；
+如果红在更前面（取数 / 渲染 / 发信），按报错原文定位，注意 `JSONDecodeError: line 1 column 1` 基本等于「源站回了空响应 / HTML」，不是格式问题。
+
+### 12.5 可复制给 AI 的提示词
+
+```text
+【任务】维护 https://github.com/wj624/etf-lsi（沪深300 + 创业板 ETF 持仓背离 + 宏观 LSI 压力指数日报）。
+
+【先读什么】
+1. README 第四章「数据源、单位换算与剔除项」→ 认两条链路：宏观走 FRED，A 股走自建 Worker。
+2. README 第九章「防 Bug 铁律」8 条 → 都是真实踩坑，禁止回退。
+3. README 第十二章（本章）→ 12.1 文件职责表、12.3 五个坑、12.4 SOP。
+4. 要动 A 股取数时，再去读 https://github.com/wj624/a-stock-api 的 README（有上游映射表与同步提示词）。
+
+【硬约束，违反即算错】
+- 只改 A 股那半（fetch_exchange.py）时，fetch_fred_lsi.py 与 common.py 一行不许动；反之亦然。
+- Worker 返回 200 + 空数组 ≠ 当天没数据。必须直连复核，只有「直连也空」才算真无数据。
+- 单位：上交所 TOT_VOL 是万份 → ×10000；深交所 xlsx 已是份 → 不许再乘。两条路径都要 round(...,2)。
+- IORB 必须留在 FRED_SERIES，同时必须留在 _CAL_EXCLUDE（两处要求相反）。
+- lsi.json 不缓存；_exchange_shares.json 随仓库提交；不许引入 actions/cache 存它。
+- 红涨绿跌（净申购/正 Spread 红 #E8453C，净赎回/负 Spread 绿 #1FB37A），格式化用 %+.1f，不要手拼 "+"。
+- 不允许「用前一交易日份额顶替缺失日」这种兜底。
+- 不要重新引入 akshare（requirements.txt 只保留 matplotlib / numpy / requests / openpyxl）。
+
+【改完必须自检】
+1. python fetch_exchange.py → 日志应出现「第 1 轮 N/N 天成功，失败 0」，不应出现熔断。
+2. 读 _exchange_shares.json：510300 在 2026-11-03 应为 44587387700.0 份（锚点，用于确认单位没跑偏）。
+3. python check_lsi_status.py → 退出码 0；若宏观降级，说明 lsi_status.json 有空的 FRED 序列，需说明原因。
+4. 本地跑一轮后看 etf_lsi_dashboard.html：宏观块与 ETF 块都要有数，不是 null。
+5. 提交前确认没有把任何密钥写进代码（FRED key、SMTP 授权码只存在于 Actions Secrets）。
+
+【提交规范】
+commit message 用中文，说明「改了什么 + 为什么」，涉及口径的改动要同步更新 README 第四 / 第九章。
+```
+
+### 12.6 动手前的三行自检
+
+- 我要改的文件属于**宏观半**还是**A 股半**？越界了吗？
+- 这次改动会不会让某个「本来有值」的字段变成空 / null，而退出码照样是 0？
+- 改完能不能用 `510300 = 44587387700.0` 这个锚点验证单位没跑偏？
+
+---
+
 ## 附：配色说明
 
 遵循 A 股习惯 **红涨绿跌**：净申购 / 正 Spread / 报警触发 → 红色 `#E8453C`；
