@@ -208,6 +208,10 @@ GLI (T)   = WALCL − WTREGEN − RRPONTSYD             美联储净流动性总
 | ETF 单位净值 | 天天基金 pingzhongdata | `fetch_exchange.py` → Worker `/api/fund-nav`，东财直连兜底 | 否 |
 | A 股交易日历 | 上证指数 K 线派生 | `fetch_exchange.py` → Worker `/api/trade-calendar` | 否 |
 | ETF 行情 / 份额快照（滞后源） | 腾讯自选股 westock | `westock-data/`（Node CLI，随仓库携带） | 否 |
+| 指数估值（PE/PB 分位） | 蛋卷基金 index_eva | `fetch_signals.py` → Worker `/api/index-valuation` | 否 |
+| 境内资金面（SHIBOR / DR007） | 中国货币网 | `fetch_signals.py` → Worker `/api/cn-liquidity` | 否 |
+| ETF 折溢价 | 腾讯行情（价）+ 东财净值 | `fetch_signals.py` → Worker `/api/etf-premium` | 否 |
+| 市场宽度（涨跌家数/涨停跌停/连板） | 东财 push2ex | `fetch_signals.py` → Worker `/api/market-breadth` | 否 |
 
 > **改造边界（重要）**：2026-11 的迁移**只动了 A 股那半**（`fetch_exchange.py`）。
 > `fetch_fred_lsi.py` 与 `common.py`（FRED 部分）**一行未改**，宏观 LSI 链路保持原样。
@@ -368,6 +372,32 @@ Worker 跑在 Cloudflare 上，出口 IP 与 runner 完全无关，且自带 KV 
 
 ---
 
+### 4.6 市场环境四件套（估值 / 境内资金面 / 折溢价 / 市场宽度）
+
+这四项由 `fetch_signals.py` 抓取，写进 `signals.json`，供看板 ⑨～⑫ 四个面板使用。
+**四个端点彼此独立**：任意一个失败，只让对应面板消失，不影响主看板、ETF 背离与宏观 LSI。
+
+| 端点 | 数据源 | 口径要点 | 已知限制 |
+| :--- | :--- | :--- | :--- |
+| `/api/index-valuation` | 蛋卷基金 | `pe_pct` = 上游 `pe_percentile`，0~1、越大越贵；`pe_over_history` 是它的互补值（1 − pe_pct），**两者互为倒数，只用前者** | 分位基于该指数 2016 年以来的历史 |
+| `/api/cn-liquidity` | 中国货币网 | SHIBOR 八期限 + 银行间回购定盘；`FDR001/007/014` 就是 **DR001/DR007/DR014**，单位 % 年化 | 回购定盘**只回最近约 1 个月**且忽略 startDate，而 SHIBOR 能回 60+ 天 —— 看板因此从「首个 DR007 有效点」起画，否则左侧会出现一大段没有 DR007 的空白 |
+| `/api/etf-premium` | 腾讯价 + 东财净值 | 折溢价 =（市价 − 净值）/ 净值 × 100 | 用的是**收盘价与当日净值**，不是盘中 IOPV。净值未更新时（`stale=true`）该值只反映相对上一日净值的偏离，看板会用 `*` 标注 |
+| `/api/market-breadth` | 东财 push2ex | 涨跌家数由「涨跌幅分布直方图」求和；涨停/跌停取池子 `tc`；连板高度取池内 `lbc` 最大值 | **只返回当日快照、不支持按日期查询**，无法回填历史。本仓库每天存一份到 `_breadth_history.json`（随仓库提交）自建序列，满 5 天才画趋势 |
+
+**为什么估值换了数据源**：原方案用 legulegu，对云端出口返回 401；中证官网估值页已改版、老接口 404。
+蛋卷 `index_eva` 免 Key、含 PE/PB 双分位 + ROE + 股息率，是目前最省事的替代。
+
+**为什么宽度的历史要自己攒**：东财这三个接口忽略 `date` 参数，传历史日期它仍然回当天。
+所以「回填」在数据源层面就不可能，只能每天抓一次当日快照。这也是为什么
+`_breadth_history.json` 必须随仓库提交（和 `_exchange_shares.json` 一个道理，不提交就永远只有 1 天）。
+
+**准确性怎么保证**：涨跌家数做了交叉校验 —— 用「涨跌幅分布求和」与东财 push2 的
+`f104/f105/f106`（涨/跌/平家数）对比，实测差异 <2%（涨 1600 vs 1598、合计 5377 vs 5295），
+差异来自是否含北交所与停牌股。**方向与量级都可信，但不做「精确到个位」的承诺**，
+所以看板只展示家数与占比，不做「今日上涨家数同比昨日 ±N」这类依赖精确值的推论。
+
+---
+
 ## 五、流水线与产物
 
 ```
@@ -377,6 +407,7 @@ daily_run.py
  ├─ fetch_ratios.py      三大风格/股债比价（周K全周期）        → ratios.json      （失败降级）
  ├─ fetch_fred_lsi.py    FRED 20 序列 + LSI + 20 项报警         → lsi.json         （失败降级）
  ├─ analyze_report.py    双宽基诊断                             → summary.json / series_<key>.json
+ ├─ fetch_signals.py     市场环境四件套（估值/资金面/折溢价/宽度）→ signals.json    （失败降级）
  ├─ render.py            高清监测图                             → etf_lsi_monitor_latest.png
  ├─ make_dashboard.py    三合一交互看板                         → etf_lsi_dashboard.html
  └─ send_mail.py         三合一汇总日报邮件                     → mail_preview.html（本地试跑）
@@ -392,6 +423,7 @@ daily_run.py
 | `fetch_fred_lsi.py` | FRED 取数 + LSI/GLI/报警/资金流向/四维诊断，并写出 `lsi_status.json` 数据完整性报告 |
 | `check_lsi_status.py` | 读 `lsi_status.json` + `lsi.json` 决定本轮退出码（有空序列或 asof 跑到未来就标红） |
 | `analyze_report.py` | 双宽基诊断 |
+| `fetch_signals.py` | 市场环境四件套取数（指数估值 / 境内资金面 / ETF 折溢价 / 市场宽度），四项独立容错，写 `signals.json` + 追加 `_breadth_history.json` |
 | `render.py` | matplotlib 四行布局 PNG |
 | `make_dashboard.py` | 自包含交互 HTML（无外部依赖，离线可看） |
 | `send_mail.py` | 汇总邮件（标题含三状态，正文五段，内嵌 PNG） |
@@ -399,7 +431,11 @@ daily_run.py
 | `westock-data/` | 腾讯自选股取数 CLI（Node，零第三方依赖，随仓库携带） |
 
 运行期产物（不提交进仓库）：`raw_data.json`、`ratios.json`、`summary.json`、`lsi.json`、
-`lsi_status.json`（数据完整性报告）、`etf_lsi_dashboard.html`、`etf_lsi_monitor_latest.png`。
+`lsi_status.json`（数据完整性报告）、`signals.json`、`etf_lsi_dashboard.html`、`etf_lsi_monitor_latest.png`。
+
+**随仓库提交的数据资产**（两个，删了才有麻烦）：
+`_exchange_shares.json`（沪市份额 250 天）与 `_breadth_history.json`（市场宽度日快照）——
+它们不是产物，是「取不到时唯一的兜底」和「上游不支持历史查询时唯一能攒出序列的地方」。
 
 ### 监测图布局
 
@@ -766,6 +802,7 @@ python send_mail.py
 | `make_dashboard.py` | 手写 SVG 渲染整张看板（无图表库，0 依赖） | 所有动态内容由 JS 渲染，不存在占位符子串覆盖问题（见铁律 5） |
 | `render.py` / `analyze_report.py` / `send_mail.py` | PNG 渲染 / 六步指标计算与五档判定 / 邮件组装发送 | 邮件用 `%+.1f`，**别再手动拼接 `+`**（会出 `++12.7`） |
 | `check_lsi_status.py` | **数据完整性闸门**，读 `lsi_status.json`，空序列/兜底异常就非 0 退出 | 工作流最后一步跑它，故意放在「发看板 / 上传 artifact」之后，让当天仍能拿到降级看板 |
+| `fetch_signals.py` | 市场环境四件套（估值/资金面/折溢价/宽度）→ `signals.json` + `_breadth_history.json` | 四项**各自独立容错**，全挂也只是四个面板不出现；新增面板只动这个文件 + `make_dashboard.py` |
 | `daily_run.py` | 本地一键跑全流程 | — |
 | `.github/workflows/daily.yml` | 调度 + 发布 + 闸门 | `cron: "17 13 * * 1-5"`（北京 21:17）有原因，见 12.3 第 5 条 |
 | `_exchange_shares.json` | 沪市份额缓存（约 260 天，600 KB 上下），**随仓库提交** | 它是「取不到时的真实兜底」，删了就等于把一次限流放大成数据空洞 |
@@ -823,6 +860,11 @@ A 股（境内）  fetch_exchange.py ── a-stock-api Worker ──┬─ quer
    19:00 跑只能拿到前一天的旧利率。21:17 在两种时制下都晚于美东 08:00，也晚于沪深晚间披露。
    一天只跑一次（避免两封邮件），当天补跑用 `workflow_dispatch`。
    超时 45 分钟是迁移 Worker 之后重算的：250 天回填从「分钟级 + 高失败率」变成「秒级」，依赖从 akshare（连带 pandas）瘦到 4 个包。
+
+6. **市场环境四件套的三个口径陷阱**（2026-11 新增，最容易「看着对其实错」）
+   - **估值字段互补**：`pe_pct` 与 `pe_over_history` 相加恒等于 1，互为倒数关系。看板只用 `pe_pct`，误用另一个会把「贵」看成「便宜」，且数字本身完全合理、不会报错。
+   - **回购定盘只回 1 个月**：中国货币网的 `FrrHis` 忽略 `startDate`，永远只返回最近约 21 个交易日，而 SHIBOR 能给 60+ 天。若照原样画，图左侧会出现一大段「只有 SHIBOR、没有 DR007」的空白——现在从首个 DR007 有效点起画。
+   - **宽度没有历史**：东财 `push2ex` 三个接口都忽略 `date` 参数，传历史日期仍回当天。所以「回填」在数据源层面不可能，只能每天存一份到 `_breadth_history.json`（**必须随仓库提交**，不提交就永远只有 1 天）。
 
 **可调旋钮（全部走环境变量，代码里有默认值，一般不用改）**
 
@@ -883,6 +925,10 @@ A 股（境内）  fetch_exchange.py ── a-stock-api Worker ──┬─ quer
 - 红涨绿跌（净申购/正 Spread 红 #E8453C，净赎回/负 Spread 绿 #1FB37A），格式化用 %+.1f，不要手拼 "+"。
 - 不允许「用前一交易日份额顶替缺失日」这种兜底。
 - 不要重新引入 akshare（requirements.txt 只保留 matplotlib / numpy / requests / openpyxl）。
+- 市场环境四件套（`fetch_signals.py`）必须保持「各项独立容错」：任一端点失败只让对应面板消失，
+  绝不能因为拉不到估值就让整轮看板失败。
+- 估值只用 `pe_pct`，不要用 `pe_over_history`（两者互补，用错会把贵看成便宜且不报错）。
+- `_breadth_history.json` 与 `_exchange_shares.json` 都是随仓库提交的数据资产，不要当产物清理。
 
 【改完必须自检】
 1. python fetch_exchange.py → 日志应出现「第 1 轮 N/N 天成功，失败 0」，不应出现熔断。
