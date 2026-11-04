@@ -125,6 +125,7 @@ jobs:
             lsi_status.json
             signals.json
           if-no-files-found: ignore
+          retention-days: 14
 
       # 把看板发布到本仓库的 gh-pages 分支（GitHub Pages 原生托管）。
       # 使用内置 GITHUB_TOKEN，无需任何 PAT；首次运行会自动创建 gh-pages 分支。
