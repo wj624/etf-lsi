@@ -231,8 +231,9 @@ background:linear-gradient(90deg,#1FB37A 0%,#5FA83A 30%,#C9A227 55%,#E0713C 78%,
 .wbar div{text-align:center;overflow:hidden;white-space:nowrap}
 .wleg{display:flex;gap:16px;font-size:11.5px;color:var(--sub);flex-wrap:wrap}
 .wleg i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
-.prow{display:grid;grid-template-columns:88px 1fr 66px;align-items:center;gap:9px;font-size:12px;padding:3px 0}
+.prow{display:grid;grid-template-columns:64px 132px 1fr 70px;align-items:center;gap:9px;font-size:12px;padding:3px 0}
 .prow .nm{color:var(--sub);font-family:Consolas,monospace}
+.prow .nmx{color:var(--txt);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ptrack{position:relative;height:16px;background:#15181D;border-radius:4px;overflow:hidden}
 .ptrack .zero{position:absolute;top:0;bottom:0;width:1px;background:#3a4150}
 .ptrack .fill{position:absolute;top:2px;bottom:2px;border-radius:3px}
@@ -249,6 +250,8 @@ border-radius:10px;padding:12px 15px;margin-bottom:10px;font-size:12.8px;line-he
   h2{font-size:13.5px}
   .panel{padding:12px 10px 10px;border-radius:12px}
   .cards{grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:9px}
+  .prow{grid-template-columns:56px 104px 1fr 62px;gap:7px;font-size:11.5px}
+  .prow .nmx{font-size:11px}
   .card{padding:10px 11px}.card .v{font-size:17px}
   table{font-size:11.4px}
   th,td{padding:6px 6px}
@@ -776,6 +779,13 @@ if (D.lsi) {
            gt(c.credit,400)?'var(--up)':'var(--down)');
   lh += kv('10Y−2Y 利差', sign(c.yield_spread,1)+' bp', 'US10Y '+fmt(d100(c.us10y),2)+'%｜US02Y '+fmt(d100(c.us02y),2)+'%',
            c.yield_spread<0?'#F5A623':'var(--down)');
+  // US02Y − EFFR：市场定价与当前政策利率的缺口。
+  // 2Y 高于 EFFR = 市场在定价「未来要加息」→ 红；低于 = 定价「要降息」→ 绿。
+  // 两个字段都是 bp 口径（459 = 4.59%），直接相减就是 bp 差，不要再 ×100。
+  const usE = (c.us02y!==null&&c.us02y!==undefined&&c.effr!==null&&c.effr!==undefined) ? (c.us02y-c.effr) : null;
+  lh += kv('US02Y − EFFR', usE===null?'—':sign(usE,1)+' bp',
+           'US02Y '+fmt(d100(c.us02y),2)+'% − EFFR '+fmt(d100(c.effr),2)+'%｜&gt;0 加息周期 · &lt;0 降息周期',
+           usE===null?'var(--txt)':(usE>0?'var(--up)':'var(--down)'));
   lh += kv('T10YIE / CPI YoY', fmt(d100(c.t10yie),2)+'% / '+fmt(d100(c.cpi_yoy),2)+'%', '偏差阈值 >0.90%',
            (c.t10yie!==null&&c.cpi_yoy!==null&&Math.abs(c.t10yie-c.cpi_yoy)>90)?'var(--up)':'var(--down)');
   lh += kv('广义美元指数', fmt(c.dxy,2), 'MA50 = '+fmt(c.dxy_ma,2)+'｜强美元阈值 > MA50',
@@ -1091,6 +1101,7 @@ $('shareBlocks').innerHTML = sh;
     const col = (v === null || v === undefined) ? '#6b7484' : (v >= 0 ? 'var(--up)' : 'var(--down)');
     const left = (v === null || v === undefined || v >= 0) ? 50 : 50 - w;
     h += '<div class="prow"><span class="nm">' + esc(r.code) + '</span>'
+      + '<span class="nmx" title="' + esc(r.name || '') + '">' + esc(r.name || '—') + '</span>'
       + '<div class="ptrack"><div class="zero" style="left:50%"></div>'
       + '<div class="fill" style="left:' + left.toFixed(2) + '%;width:' + Math.max(w, 0.4).toFixed(2)
       + '%;background:' + col + '"></div></div>'
@@ -1098,8 +1109,6 @@ $('shareBlocks').innerHTML = sh;
       + (v === null || v === undefined ? '—' : (v >= 0 ? '+' : '') + v.toFixed(3) + '%')
       + (r.stale ? '<span style="color:#F5A623;font-size:10px"> *</span>' : '') + '</span></div>';
   }
-  const nm = {}; for (const r of rows) nm[r.code] = r.name;
-  h += '<div class="foot" style="margin-top:8px">' + rows.map(r => esc(r.code) + ' ' + esc(nm[r.code] || '')).join('　｜　') + '</div>';
   $('premBox').innerHTML = h;
 })();
 
