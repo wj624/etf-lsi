@@ -7,10 +7,24 @@
   返回最近一次已披露值，导致看板尾部 1~2 个交易日的 shares / nav / size 被冻结。
   交易所官方披露是 T+0（当日收盘后即公布当日份额），可以彻底消除这个滞后。
 
-数据源：
-  沪市份额 : akshare fund_etf_scale_sse(date=YYYYMMDD)        逐日
-  深市份额 : akshare fund_scale_daily_szse(start,end,'ETF')   区间批量
-  单位净值 : akshare fund_open_fund_info_em(indicator=单位净值走势)  全历史，约 0.15s/只
+数据源（2026-11 起不再依赖 akshare，统一走自建 a-stock-api Worker）：
+  沪市份额 : Worker /api/etf-shares?exchange=SH&date=YYYY-MM-DD  -> 上交所 query.sse.com.cn
+             直连 query.sse.com.cn 保留为第 2 通道（同源、自带 timeout 与重试）
+  深市份额 : 深交所官方 xlsx（www.szse.cn/api/report/ShowReport, CATALOGID=scsj_fund_jjgm）
+             区间批量，等价于原 akshare.fund_scale_daily_szse（列名 基金规模(份) 即「份」）
+  单位净值 : Worker /api/fund-nav?code=XXX -> 东财 pingzhongdata 全历史
+             直连东财 pingzhongdata 保留为第 2 通道
+  交易日历 : Worker /api/trade-calendar -> 派生自上证指数日K
+
+为什么改成 Worker：
+  2026-11-01 云端实测，GitHub runner 出口 IP 会被 query.sse.com.cn 限流（本机 248/248 全过，
+  runner 10/10 全挂，服务端直接回空/HTML 而非超时）。Worker 走 Cloudflare 出口，不受 runner
+  IP 影响，且带 KV 缓存，250 天回填从「分钟级 + 高失败率」变成「秒级 + 稳定」。
+  同时去掉 akshare 这层重依赖（其内部 http.get 既无 timeout 也无重试）。
+
+单位约定（错一个数量级就会静默毁掉全部份额指标）：
+  上交所接口 TOT_VOL 的原始单位是「万份」，必须 × 10000 才是「份」；
+  深交所 xlsx 的「基金规模(份)」本身已是「份」，不得再乘。
 
 输出：_exchange_shares.json
   {
@@ -21,13 +35,17 @@
 
 失败不影响主流程：取不到就返回 None，上层回退 westock 原值。
 """
-import json, os, random, sys, threading, time, datetime
+import io, json, os, random, sys, threading, time, datetime
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 if BASE not in sys.path:
     sys.path.insert(0, BASE)
 
 CACHE = os.path.join(BASE, '_exchange_shares.json')
+
+# 自建数据代理（Cloudflare Worker）。国内本地调试可覆盖为其它地址。
+API_BASE = (os.environ.get('ETF_API_BASE') or 'https://a-stock-api.wj4020410.workers.dev').rstrip('/')
+API_TIMEOUT = float(os.environ.get('ETF_API_TIMEOUT', '30'))
 
 # 首次回填窗口（交易日数）与每次强制刷新的尾部天数
 WINDOW_DAYS = int(os.environ.get('ETF_EXCHANGE_DAYS', '250'))
@@ -42,13 +60,29 @@ SSE_BREAKER = int(os.environ.get('ETF_SSE_BREAKER', '12'))
 # 超过上限时接口不报错而是直接返回空表 —— 必须分段请求，每段留足余量
 SZSE_CHUNK = int(os.environ.get('ETF_SZSE_CHUNK', '20'))
 
-# 上交所份额直连参数（与 akshare 内部用的完全同一接口，只是我们自带 timeout 与重试）
+# 上交所份额直连参数（与 Worker 里用的是完全同一接口，只是我们自带 timeout 与重试）
 SSE_URL = 'https://query.sse.com.cn/commonQuery.do'
 SSE_HEADERS = {
     'Referer': 'https://www.sse.com.cn/',
     'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                    '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
     'Accept': '*/*',
+}
+
+# 深交所基金规模 xlsx（区间查询，一次拿回 start~end 内每个交易日的全市场 ETF 规模）
+SZSE_URL = 'https://www.szse.cn/api/report/ShowReport'
+SZSE_HEADERS = {
+    'Host': 'www.szse.cn',
+    'Referer': 'https://www.szse.cn/market/fund/volume/etf/index.html',
+    'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                   '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
+}
+
+# 东财净值 js（Worker 通道失败时的兜底）
+EM_NAV_URL = 'https://fund.eastmoney.com/pingzhongdata/%s.js'
+EM_NAV_HEADERS = {
+    'User-Agent': 'Mozilla/5.0',
+    'Referer': 'https://fund.eastmoney.com/',
 }
 
 SH_CODES, SZ_CODES = [], []
@@ -89,24 +123,46 @@ def _retry(fn, tries=3, gap=2, jitter=0.5, label=''):
     raise RuntimeError(('%s ' % label if label else '') + str(last))
 
 
+def _api_get(path, params=None, tries=3):
+    """GET 自建 Worker。内部已自带重试，调用方不必再套 _retry。"""
+    import requests
+    last = None
+    for i in range(tries):
+        try:
+            r = requests.get(API_BASE + path, params=(params or {}), timeout=API_TIMEOUT)
+            r.raise_for_status()
+            j = r.json()
+            if isinstance(j, dict) and j.get('error'):
+                # Worker 把上游失败包成 200 + {"error": ...} 的情况也要当失败重试
+                raise RuntimeError('%s: %s' % (j.get('error'), str(j.get('message'))[:80]))
+            return j
+        except Exception as e:
+            last = '%s: %s' % (type(e).__name__, str(e)[:90])
+            if i == tries - 1:
+                break
+            time.sleep(1.5 * (i + 1))
+    raise RuntimeError('[Worker %s] %s' % (path, last))
+
+
 def get_trade_days(days=520):
     """A 股交易日历 -> ['YYYY-MM-DD', ...] 升序"""
-    import akshare as ak
-    df = _retry(lambda: ak.tool_trade_date_hist_sina())
+    j = _api_get('/api/trade-calendar', {'start': '2010-01-01'})
     out = []
-    for x in df['trade_date']:
+    for x in (j.get('data') or []):
         s = str(x)[:10].replace('/', '-')
         if len(s) == 10 and s[4] == '-':
             out.append(s)
     out = sorted(set(out))
+    if not out:
+        raise RuntimeError('交易日历为空（Worker 返回 0 条）')
     return out[-days:]
 
 
 class _Breaker:
     """简易熔断器：连续失败达到阈值就认定「接口整段不可用」，后续日期直接跳过。
 
-    为什么需要：首次回填要抓 320 天，每天 3 次重试 × 退避(2/4s) ≈ 6 秒。
-    如果上交所整段挂掉（不是偶发），320 天 ÷ 4 线程 × 6s ≈ 8 分钟纯白等，
+    为什么需要：首次回填要抓 250 天，每天 3 次重试 × 退避(2/4s) ≈ 6 秒。
+    如果上游整段挂掉（不是偶发），250 天 ÷ 4 线程 × 6s ≈ 6 分钟纯白等，
     加上第二轮补抓更久。熔断后直接跳完，1 分钟内结束，缺口交给下一轮补。
     """
 
@@ -130,41 +186,39 @@ class _Breaker:
 _BREAKER = _Breaker(SSE_BREAKER)
 
 
-def _sse_parse_akshare(df):
-    """akshare 版本的 DataFrame -> {code: shares}"""
-    code_col = '基金代码' if '基金代码' in df.columns else df.columns[0]
-    share_col = '基金份额' if '基金份额' in df.columns else df.columns[-1]
+def _sse_via_worker(date_compact):
+    """通道 1：自建 Worker 代理上交所（Cloudflare 出口 IP，不受 runner IP 限流影响）。
+
+    Worker 返回的 shares_10k 单位是「万份」，这里 × 10000 换成「份」，
+    与 _exchange_shares.json 的历史口径保持一致。
+    """
+    j = _api_get('/api/etf-shares', {'exchange': 'SH', 'date': _compact2dash(date_compact)})
     out = {}
-    for _, row in df.iterrows():
-        c = str(row[code_col]).strip()
-        if c in SH_CODES:
-            try:
-                out[c] = float(row[share_col])
-            except Exception:
-                pass
+    for it in (j.get('data') or []):
+        c = str(it.get('code') or '').strip()
+        if c not in SH_CODES:
+            continue
+        v = it.get('shares_10k')
+        if v is None:
+            continue
+        try:
+            # 万份 -> 份。round 只为抹掉 float 噪声（4458738.77*1e4 会算出 ...99.99999），
+            # 否则 592KB 的份额缓存每天都会产生「值没变但末位抖了」的无意义 diff
+            out[c] = round(float(v) * 10000.0, 2)
+        except Exception:
+            pass
     return out
 
 
-def _sse_via_akshare(date_compact):
-    """通道 1：akshare。省事，但它的内部 http.get 没有 timeout、也没有重试，
-    服务端返回 HTML 错误页时会直接抛 JSONDecodeError。"""
-    import akshare as ak
-    df = _retry(lambda: ak.fund_etf_scale_sse(date=date_compact),
-                tries=SSE_RETRY, gap=2, label='[akshare]')
-    if df is None or len(df) == 0:
-        return {}
-    return _sse_parse_akshare(df)
-
-
 def _sse_via_http(date_compact):
-    """通道 2：直连 query.sse.com.cn 的同一个接口（与 akshare 同源），
-    但我们自带 timeout=25s、自带重试，且不依赖 akshare 的版本行为。
+    """通道 2：直连 query.sse.com.cn 的同一个接口（与 Worker 同源），
+    但我们自带 timeout=25s、自带重试，且不依赖 Worker 是否在线。
 
-    实测两者结果完全一致（510300：TOT_VOL 3886698.77 × 1e4 = 38,866,987,700，
-    与 akshare 输出逐位相同）；上交所原始单位是「万份」，必须 × 10000。
+    实测两者结果完全一致（510300：TOT_VOL 3886698.77 × 1e4 = 38,866,987,700）；
+    上交所原始单位是「万份」，必须 × 10000。
     """
     import requests
-    d = '%s-%s-%s' % (date_compact[:4], date_compact[4:6], date_compact[6:])
+    d = _compact2dash(date_compact)
     params = {
         'isPagination': 'true', 'pageHelp.pageSize': '10000',
         'pageHelp.pageNo': '1', 'pageHelp.beginPage': '1',
@@ -182,7 +236,7 @@ def _sse_via_http(date_compact):
             c = str(it.get('SEC_CODE', '')).strip()
             if c in SH_CODES:
                 try:
-                    out[c] = float(it['TOT_VOL']) * 10000.0    # 万份 -> 份
+                    out[c] = round(float(it['TOT_VOL']) * 10000.0, 2)    # 万份 -> 份
                 except Exception:
                     pass
         return out
@@ -194,75 +248,164 @@ def fetch_sse(date_compact):
     """上交所单日全部 ETF 份额 -> {code: shares}
 
     三个层次（依次降级）：
-      1. akshare 通道（带 3 次退避重试）
-      2. 直连 query.sse.com.cn（同源、自带 timeout，绕开 akshare 无 timeout 的短板）
-      3. 熔断跳过 —— 前两个通道连续失败达阈值时直接放弃，避免整轮回填卡死
+      1. 自建 Worker（Cloudflare 出口，绕开 runner IP 被限流的老问题）
+      2. 直连 query.sse.com.cn（同源、自带 timeout）
+      3. 熔断跳过 —— 两个通道连续失败达阈值时直接放弃，避免整轮回填卡死
     空表（接口正常但当天无数据）不算失败，返回 {}。
     """
     if _BREAKER.tripped:
         raise RuntimeError('接口熔断中，本轮跳过')
     err1 = None
     try:
-        out = _sse_via_akshare(date_compact)
+        out = _sse_via_worker(date_compact)
         _BREAKER.ok()
         return out
     except Exception as e1:
         # 注意：except 子句里的 e1 出了块就会被释放，必须先另存一份给下面拼接报错用
         err1 = e1
-        print('  ~ sse %s akshare 通道失败（%s），改直连' % (date_compact, str(e1)[:80]), flush=True)
+        print('  ~ sse %s Worker 通道失败（%s），改直连' % (date_compact, str(e1)[:80]), flush=True)
     try:
         out = _sse_via_http(date_compact)
         _BREAKER.ok()
         return out
     except Exception as e2:
         # 两条通道都挂才算真失败，记一笔给熔断器
-        # （2026-11-01 云端实测：runner 出口 IP 被限流时会连续 JSONDecodeError，
-        #   akshare 与直连是同一个 query.sse.com.cn，所以两条会同时挂）
         _BREAKER.bad()
         raise RuntimeError('%s｜直连也失败: %s' % (err1, e2))
 
 
 def fetch_szse(start_compact, end_compact):
-    """深交所区间批量 ETF 份额 -> {date: {code: shares}}"""
-    import akshare as ak
-    df = _retry(lambda: ak.fund_scale_daily_szse(start_date=start_compact,
-                                                 end_date=end_compact, symbol='ETF'),
-                tries=3, gap=3)
-    if df is None or len(df) == 0:
-        return {}
-    out = {}
-    for _, row in df.iterrows():
-        c = str(row['基金代码']).strip()
-        if c not in SZ_CODES:
+    """深交所区间批量 ETF 份额 -> {date: {code: shares}}
+
+    直连官方 xlsx（等价于原 akshare.fund_scale_daily_szse）：
+      CATALOGID=scsj_fund_jjgm / TABKEY=tab1 / jjlb=ETF
+      列：日期 | 基金代码 | 基金简称 | 基金规模(份)
+    「基金规模(份)」已是「份」，不再乘 10000。
+    注意 SHOWTYPE=JSON 对该接口返回 HTTP 500，只有 xlsx 可用。
+    """
+    import requests
+    from openpyxl import load_workbook
+    params = {
+        'SHOWTYPE': 'xlsx',
+        'CATALOGID': 'scsj_fund_jjgm',
+        'TABKEY': 'tab1',
+        'txtStart': _compact2dash(start_compact),
+        'txtEnd': _compact2dash(end_compact),
+        'jjlb': 'ETF',
+        'random': str(random.random()),
+    }
+
+    def _once():
+        r = requests.get(SZSE_URL, params=params, headers=SZSE_HEADERS, timeout=90)
+        r.raise_for_status()
+        if r.content[:2] != b'PK':
+            # 服务端出错时回的是 HTML/JSON 错误页，这里给它一个可读的报错
+            raise RuntimeError('非 xlsx 响应（前 80 字节: %r）' % r.content[:80])
+        wb = load_workbook(io.BytesIO(r.content), data_only=True)
+        ws = wb[wb.sheetnames[0]]
+        rows = ws.iter_rows(values_only=True)
+        head = next(rows, None) or ()
+        idx = {}
+        for i, h in enumerate(head):
+            if h:
+                idx[str(h).strip()] = i
+        ci = idx.get('基金代码', 1)
+        di = idx.get('日期', 0)
+        si = idx.get('基金份额', idx.get('基金规模(份)', 3))
+        out = {}
+        for row in rows:
+            if not row:
+                continue
+            c = str(row[ci] if ci < len(row) else '').strip()
+            if c not in SZ_CODES:
+                continue
+            d = str(row[di] if di < len(row) else '')[:10].replace('/', '-')
+            if len(d) != 10 or d[4] != '-':
+                continue
+            try:
+                out.setdefault(d, {})[c] = float(row[si])
+            except Exception:
+                pass
+        return out
+
+    return _retry(_once, tries=3, gap=3, label='[深交所]')
+
+
+def _nav_extract(text, var):
+    """从 pingzhongdata js 里抠出 `var = [...];` 的数组字面量"""
+    i = text.find(var)
+    if i < 0:
+        return []
+    a = text.find('[', i)
+    if a < 0:
+        return []
+    b = text.find('];', a)
+    if b < 0:
+        return []
+    try:
+        return json.loads(text[a:b + 1])
+    except Exception:
+        return []
+
+
+def _nav_via_em_direct(code):
+    """通道 2：直连东财 pingzhongdata。
+
+    与 Worker 内的 fetchFundNav 逐字对齐：x 是「北京零点」的时间戳（等价 UTC-16:00），
+    必须先 +8h 再取日期，否则整段净值会错位一天、和交易日历/份额对不上。
+    """
+    import requests
+    r = requests.get(EM_NAV_URL % code, headers=EM_NAV_HEADERS, timeout=25)
+    r.raise_for_status()
+    m = {}
+    for it in _nav_extract(r.text, 'Data_netWorthTrend'):
+        if not isinstance(it, dict) or it.get('x') is None:
             continue
-        d = str(row['日期'])[:10]
         try:
-            out.setdefault(d, {})[c] = float(row['基金份额'])
+            ts = int(it['x']) + 8 * 3600 * 1000
+            d = (datetime.datetime(1970, 1, 1)
+                 + datetime.timedelta(milliseconds=ts)).strftime('%Y-%m-%d')
+            m[d] = float(it.get('y'))
         except Exception:
             pass
-    return out
+    return m
 
 
 def fetch_nav(codes):
-    """天天基金单位净值全历史 -> {code: {date: nav}}"""
-    import akshare as ak
+    """单位净值全历史 -> {code: {date: nav}}"""
     out = {}
     for c in codes:
+        err = None
         try:
-            info = _retry(lambda c=c: ak.fund_open_fund_info_em(symbol=c, indicator='单位净值走势'),
-                          tries=3, gap=2)
+            j = _api_get('/api/fund-nav', {'code': c})
             m = {}
-            for _, row in info.iterrows():
-                d = str(row.get('净值日期'))[:10]
+            for it in (j.get('data') or []):
+                d = str(it.get('date') or '')[:10]
+                if len(d) != 10 or d[4] != '-':
+                    continue
                 try:
-                    m[d] = float(row.get('单位净值'))
+                    m[d] = float(it['nav'])
                 except Exception:
                     pass
             if m:
                 out[c] = m
                 print('  nav %s ok (%d 天)' % (c, len(m)), flush=True)
+                continue
+            err = 'Worker 返回 0 条'
         except Exception as e:
-            print('  nav %s FAIL %s' % (c, str(e)[:80]), flush=True)
+            err = str(e)[:80]
+        # Worker 不可用（或空表）时退到东财直连
+        try:
+            m = _retry(lambda c=c: _nav_via_em_direct(c), tries=2, gap=2, label='[东财直连]')
+            if m:
+                out[c] = m
+                print('  nav %s ok (%d 天，东财直连兜底；Worker: %s)'
+                      % (c, len(m), err), flush=True)
+                continue
+            err = '%s / 东财直连也空' % err
+        except Exception as e:
+            err = '%s / 东财直连失败: %s' % (err, str(e)[:80])
+        print('  nav %s FAIL %s' % (c, err), flush=True)
     return out
 
 
@@ -330,6 +473,7 @@ def main():
     mapping = load_etfs()
     codes = sorted(set(c for c, _ in mapping.values()))
     print('标的数量: %d（沪 %d / 深 %d）' % (len(codes), len(SH_CODES), len(SZ_CODES)))
+    print('数据源: %s' % API_BASE)
 
     cache = load_cache()
     # 交易日历含未来日期（新浪会推到年底），必须截断到今天，否则会去抓尚未发生的交易日
@@ -365,11 +509,10 @@ def main():
             todo_c = [d.replace('-', '') for d in todo][-MAX_SSE_CALLS:]
             t0 = time.time()
 
-            # 开工前先探最近一个交易日：github runner 的出口 IP 会被 query.sse.com.cn 限流
-            # （实测 2026-11-01：本机 248/248 全过，runner 10/10 全挂，报错是
-            #  JSONDecodeError: line 1 column 1 —— 服务端直接回了空/HTML，不是超时）。
-            # 整段不可用时每个日期都要烧 3 次 akshare 重试 + 3 次直连重试 ≈ 12s，
-            # 248 天就是 8 分钟纯白等。先花一次请求探一下，不可用就直接跳过整段。
+            # 开工前先探最近一个交易日：既然第 1 通道是 Worker，探测失败基本等于
+            # 「网络整体不通」或「Worker 挂了且直连也被限流」，此时整段跳过比逐日白等划算
+            # （2026-11-01 实测：runner 出口 IP 被 query.sse.com.cn 限流时，
+            #  每个日期都要烧 3 次 Worker 重试 + 3 次直连重试 ≈ 12s）。
             probe = todo_c[-1]
             try:
                 pm = fetch_sse(probe)
@@ -441,6 +584,7 @@ def main():
         'sse_failed_dates': sse_failed_dates[:60],
         'sse_breaker_tripped': _BREAKER.tripped,
         'days': len(cache['shares']),
+        'source': API_BASE,
     }
     with open(CACHE, 'w', encoding='utf-8') as f:
         json.dump(cache, f, ensure_ascii=False)
