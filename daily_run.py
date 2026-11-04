@@ -7,11 +7,12 @@ fetch_exchange.py（交易所官方 ETF 份额/净值，T+0，替代 westock 的
   → fetch_ratios.py（三大风格/股债比价）
   → fetch_fred_lsi.py（FRED 20 序列 + LSI + 20 项报警）
   → analyze_report.py（双宽基诊断）
+  → fetch_signals.py（市场环境四件套：估值/境内资金面/折溢价/市场宽度）
   → render.py（高清监测图 PNG）
   → make_dashboard.py（三合一交互 HTML 看板）
   → send_mail.py（三合一汇总日报邮件）
 
-fetch_ratios / fetch_fred_lsi 为增强模块：失败仅降级，不阻断主报告。
+fetch_ratios / fetch_fred_lsi / fetch_signals 为增强模块：失败仅降级，不阻断主报告。
 """
 import subprocess, sys, os, json
 
@@ -29,6 +30,8 @@ STEPS = [
     ('fetch_ratios.py', False),
     ('fetch_fred_lsi.py', False),
     ('analyze_report.py', True),
+    # 市场环境四件套：四个端点各自独立容错，全挂也只是四块面板不出现
+    ('fetch_signals.py', False),
     ('render.py', True),
     ('make_dashboard.py', True),
 ]
