@@ -126,7 +126,7 @@ def main():
     if S:
         # 只做「有就传、没有就整块不出现」的处理：任一子项缺失都不影响其它面板。
         sig = {'updated': S.get('updated', '')}
-        for k in ('valuation', 'liquidity', 'premium', 'breadth', 'rates'):
+        for k in ('valuation', 'liquidity', 'premium', 'breadth', 'rates', 'macro_ratios'):
             if S.get(k):
                 sig[k] = S[k]
         if S.get('errors'):
@@ -273,6 +273,9 @@ border-radius:10px;padding:12px 15px;margin-bottom:10px;font-size:12.8px;line-he
 </div>
 
 <div class="cards" id="topCards"></div>
+
+<div class="subh" id="macroRatioHead" style="display:none">跨资产比价 / 风险偏好<span style="font-weight:400">　·　外盘连续合约盘中快照 · KOSPI/GOLD 固定阈值 1.85 / 1.10</span></div>
+<div class="cards" id="macroRatioCards" style="display:none"></div>
 
 <div id="trackBlocks"></div>
 
@@ -424,6 +427,32 @@ if (D.lsi) {
         '<div class="card"><div class="k">RRP 缓冲垫 / 信用利差</div><div class="v" style="color:' + (lt(c.rrp_pct,5)?'var(--up)':'var(--down)') + '">' + fmt(c.rrp_pct,1) + '%</div><div class="d">RRP ' + fmt(c.rrp_T,3) + ' T｜利差 ' + fmt(c.credit,0) + ' bp</div></div>';
 }
 $('topCards').innerHTML = ch;
+
+/* ---------- 跨资产比价 / 风险偏好（4 张卡，样式与顶部 9 张一致） ---------- */
+const MR = D.signals && D.signals.macro_ratios;
+if (MR && MR.gold_silver && MR.gold_oil && MR.copper_gold && MR.kospi_gold) {
+  const pct1 = (v) => (v === null || v === undefined) ? '—' : sign(v, 1) + '%';
+  const mcard = (k, v, col, d) => '<div class="card"><div class="k">' + k + '</div>'
+    + '<div class="v" style="color:' + col + '">' + v + '</div>'
+    + '<div class="d">' + d + '</div></div>';
+  let mh = '';
+  const gs = MR.gold_silver, go = MR.gold_oil, cg = MR.copper_gold, kg = MR.kospi_gold;
+  mh += mcard('金银比 · GC / SI', fmt(gs.value, 2), 'var(--orange)',
+              '20日 ' + pct1(gs.chg20_pct) + '｜250日分位 ' + fmt(gs.pct250, 1) + '%');
+  mh += mcard('金油比 · GC / CL', fmt(go.value, 2), 'var(--blue)',
+              '20日 ' + pct1(go.chg20_pct) + '｜250日分位 ' + fmt(go.pct250, 1) + '%');
+  mh += mcard('铜金比 · HG / GC', fmt(cg.value, 2), 'var(--cyan)',
+              '20日 ' + pct1(cg.chg20_pct) + '｜250日分位 ' + fmt(cg.pct250, 1) + '%');
+  const sigCol = kg.signal === 'sell' ? 'var(--up)'
+               : (kg.signal === 'buy' ? 'var(--down)' : 'var(--txt)');
+  const sigTxt = kg.signal === 'sell' ? '卖股票' : (kg.signal === 'buy' ? '买股票' : '中性');
+  mh += mcard('KOSPI / 黄金(盎司)', fmt(kg.value, 4), sigCol,
+              sigTxt + '｜距上限 ' + pct1(kg.dist_hi_pct)
+              + '｜距下限 ' + pct1(kg.dist_lo_pct));
+  $('macroRatioHead').style.display = '';
+  $('macroRatioCards').innerHTML = mh;
+  $('macroRatioCards').style.display = '';
+}
 
 /* ---------- 双宽基交互图（滚轮缩放 / 拖拽平移 / 区间按钮） ---------- */
 const ZMIN = 15;                                  /* 窗口最窄保留 15 个点 */

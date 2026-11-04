@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""抓取「市场环境」五件套：指数估值 / 境内资金面 / ETF 折溢价 / 市场宽度 / 国债曲线。
+"""抓取「市场环境」六件套：指数估值 / 境内资金面 / ETF 折溢价 / 市场宽度 / 国债曲线 / 跨资产比价。
 
-这五个端点都是 2026-11 加（或改造）到 a-stock-api Worker 的，**彼此完全独立**：
+这六个端点都是 2026-11 加（或改造）到 a-stock-api Worker 的，**彼此完全独立**：
 任何一个失败都只让对应面板消失，不影响主看板、ETF 背离、宏观 LSI。
 
 设计原则（与 fetch_exchange.py 一致）：
@@ -198,18 +198,38 @@ def get_rates(out, days=250):
              b(lt.get('cn_10y_2y')), len(rows)), flush=True)
 
 
+def get_macro_ratios(out):
+    """跨资产比价：金银比 / 金油比 / 铜金比 + KOSPI/GOLD 固定阈值信号。
+
+    上游是 a-stock-api 的 /api/macro-ratios（服务端已拉 6 条外盘日K算好分位），
+    这里只做字段校验与精简，不在本仓库重算任何比值。
+    """
+    j = _get('/api/macro-ratios')
+    keys = ('gold_silver', 'gold_oil', 'copper_gold', 'kospi_gold')
+    if not all(j.get(k) for k in keys):
+        raise RuntimeError('/api/macro-ratios 字段不全: %s' % ','.join(k for k in keys if not j.get(k)))
+    r = {k: j[k] for k in keys}
+    r['asof'] = j.get('asof', '')
+    r['gold_close'] = j.get('gold_close')
+    r['kospi'] = j.get('kospi')
+    r['source'] = 'a-stock-api /api/macro-ratios'
+    if j.get('errs'):
+        r['upstream_error'] = j['errs']
+    out['macro_ratios'] = r
+
 STEPS = [
     ('valuation', '指数估值', get_valuation),
     ('liquidity', '境内资金面', get_liquidity),
     ('premium', 'ETF 折溢价', get_premium),
     ('breadth', '市场宽度', get_breadth),
     ('rates', '国债曲线', get_rates),
+    ('macro_ratios', '跨资产比价', get_macro_ratios),
 ]
 
 
 def main():
     out = {'updated': now_bj(), 'source': API_BASE, 'errors': []}
-    print('== 抓取市场环境五件套 ==', flush=True)
+    print('== 抓取市场环境六件套 ==', flush=True)
     for key, label, fn in STEPS:
         try:
             fn(out)
