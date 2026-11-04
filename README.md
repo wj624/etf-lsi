@@ -196,6 +196,32 @@ GLI (T)   = WALCL − WTREGEN − RRPONTSYD             美联储净流动性总
 
 ## 四、数据源、单位换算与剔除项
 
+### 4.0 数据源总表（先看这张）
+
+本仓库是**两条完全独立的取数链路**，互不影响：宏观走 FRED（境外、需 Key），A 股走自建 Worker。
+
+| 数据 | 来源 | 取数位置 | 需要 Key |
+| :--- | :--- | :--- | :---: |
+| 宏观 LSI 20+ 项序列 | 美联储 FRED 官方 API | `fetch_fred_lsi.py`（JSON 接口，失败自动降级 CSV） | 需要 `FRED_API_KEY` |
+| 沪市 ETF 份额 | 上交所 `query.sse.com.cn` | `fetch_exchange.py` → Worker `/api/etf-shares?exchange=SH`，直连兜底 | 否 |
+| 深市 ETF 份额 | 深交所官方 xlsx | `fetch_exchange.py` 内直连 `www.szse.cn/api/report/ShowReport` | 否 |
+| ETF 单位净值 | 天天基金 pingzhongdata | `fetch_exchange.py` → Worker `/api/fund-nav`，东财直连兜底 | 否 |
+| A 股交易日历 | 上证指数 K 线派生 | `fetch_exchange.py` → Worker `/api/trade-calendar` | 否 |
+| ETF 行情 / 份额快照（滞后源） | 腾讯自选股 westock | `westock-data/`（Node CLI，随仓库携带） | 否 |
+
+> **改造边界（重要）**：2026-11 的迁移**只动了 A 股那半**（`fetch_exchange.py`）。
+> `fetch_fred_lsi.py` 与 `common.py`（FRED 部分）**一行未改**，宏观 LSI 链路保持原样。
+> 想改宏观部分时，不要顺手去动 Worker 那边；想改 A 股部分时，也不要碰 FRED。
+
+**上游 / 依赖变了怎么办**
+
+- A 股这半只消费 Worker 的 HTTP 契约。Worker 侧怎么同步上游、怎么验证、怎么部署，见
+  [`wj624/a-stock-api` 的 README](https://github.com/wj624/a-stock-api/blob/main/README.md)
+  —— 里面有一份**可直接复制给 AI 的同步提示词**和 Runbook。只要字段名与单位不变，本仓库无需改动。
+- `requirements.txt` 现在只有 4 个依赖：`matplotlib / numpy / requests / openpyxl`。
+  **已彻底移除 akshare**（连带 pandas），装依赖时间从分钟级降到秒级。
+  若有人想重新引入 akshare，请先读 4.4 节，那里写了它为什么被拿掉。
+
 ### 4.1 FRED 序列与单位换算表（防 1000 倍误差必读）
 
 | # | 指标 | FRED `series_id` | FRED 原始单位 | 换算为脚本口径 |
@@ -285,7 +311,7 @@ workflow 最后一步 `check_lsi_status.py` 读它决定这一轮的结论：
 - **`fetch_fred_lsi.py` 里 `lsi.json` 先落盘、最后才 `sys.exit(1)`**，保证有数据就先给看板用。
   `daily_run.py` 里本模块是「失败仅降级不阻断」，所以 ETF 主报告、PNG、邮件都不受影响。
 
-### 4.4 交易所份额（上交所）：三层容错 + 开工探测
+### 4.4 交易所份额（上交所）：多层容错 + 开工探测
 
 上交所份额是**逐日单点请求**（一天一次），也是最容易被限流的环节。
 2026-11 起这一层改成**先打自建 Worker**（`a-stock-api.wj4020410.workers.dev`），
