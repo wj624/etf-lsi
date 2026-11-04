@@ -72,31 +72,43 @@ jobs:
           FRED_API_KEY:     ${{ secrets.FRED_API_KEY }}
         run: python daily_run.py
 
-      # 把交易所份额缓存提交回仓库（云端自持）。
+      # 把交易所份额缓存 + 市场宽度历史一起提交回仓库（云端自持）。
       # 不加 actions/cache：那份缓存 7 天不用会被清掉，届时又要全量重抓 250 天。
+      # _breadth_history.json 同理：涨跌家数上游不支持按日期查询，只能每天存一份快照，
+      # 不提交就永远只有 1 天、永远画不出趋势。
       # 注意本仓库的 push 触发器只监听 daily.yml，提交缓存不会造成自我触发。
-      - name: Persist exchange shares cache
+      - name: Persist caches
         if: always()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          # fetch_exchange 是降级模块，若整段失败就不会产出缓存文件，此时直接跳过而不是报错
-          if [ ! -f _exchange_shares.json ]; then
-            echo "!! 未生成份额缓存（fetch_exchange 未成功），跳过提交"
-            exit 0
-          fi
           git config user.name  "etf-lsi-bot"
           git config user.email "bot@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
-          git add -f _exchange_shares.json
-          if git diff --staged --quiet; then
-            echo "份额缓存无变化，跳过提交"
+          added=0
+          # fetch_exchange / fetch_signals 都是降级模块，失败时不产出文件，跳过而不是报错
+          if [ -f _exchange_shares.json ]; then
+            git add -f _exchange_shares.json; added=1
           else
-            git commit -m "chore: update exchange shares cache $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo "!! 未生成份额缓存（fetch_exchange 未成功），跳过该文件"
+          fi
+          if [ -f _breadth_history.json ]; then
+            git add -f _breadth_history.json; added=1
+          else
+            echo "!! 未生成宽度历史（fetch_signals 未成功），跳过该文件"
+          fi
+          if [ "${added}" -eq 0 ]; then
+            echo "两个缓存文件都不存在，直接退出"
+            exit 0
+          fi
+          if git diff --staged --quiet; then
+            echo "缓存无变化，跳过提交"
+          else
+            git commit -m "chore: update caches $(date -u '+%Y-%m-%d %H:%M UTC')"
             git pull --rebase origin main || { echo "rebase 失败，交由下次调度"; exit 0; }
             git push origin HEAD:main
-            echo "份额缓存已提交"
+            echo "缓存已提交"
           fi
 
       - name: Upload artifacts
@@ -111,6 +123,7 @@ jobs:
             ratios.json
             lsi.json
             lsi_status.json
+            signals.json
           if-no-files-found: ignore
 
       # 把看板发布到本仓库的 gh-pages 分支（GitHub Pages 原生托管）。
