@@ -5,7 +5,8 @@
 标题：[A股双宽基主力 & 宏观LSI日报] YYYY-MM-DD | 沪深300: <状态> | 创业板: <状态> | 宏观: <状态> (LSI: XX.X BP)
 
 正文：① 沪深300 诊断 + 份额明细　② 创业板 诊断 + 份额明细
-     ③ 三大风格/股债性价比百分位　④ LSI 核心面板 + 20项报警明细表 + 四维诊断　⑤ 内嵌监测图
+     ③ 三大风格/股债性价比百分位　④ LSI 核心面板 + 20项报警明细表 + 四维诊断
+     ⑤ 市场环境四件套（估值 / 境内资金面 / 折溢价 / 市场宽度）　⑥ 内嵌监测图
 
 凭证优先级：环境变量 ETF_SMTP_USER / ETF_SMTP_PASS / ETF_MAIL_TO（GitHub Actions Secrets）
             > email_config.json
@@ -237,6 +238,263 @@ def lsi_block(L):
     return h
 
 
+def _bar(p, color, w=54):
+    """0~1 的百分位画成一条小进度条（邮件客户端只认嵌套 inline-block + 百分比宽度）"""
+    if p is None:
+        return ''
+    v = max(0.0, min(1.0, float(p))) * 100
+    return ('<span style="display:inline-block;width:%dpx;height:6px;background:#E8EAED;'
+            'border-radius:3px;vertical-align:middle;margin-right:5px">'
+            '<span style="display:inline-block;width:%.0f%%;height:6px;background:%s;'
+            'border-radius:3px;vertical-align:top"></span></span>' % (w, v, color))
+
+
+def _pct_word(p):
+    """分位 -> (文字, 颜色)。红=贵、绿=便宜，沿用 A 股红涨绿跌的直觉。"""
+    if p is None:
+        return '—', '#333'
+    if p >= 0.80:
+        return '高估区', CLR_UP
+    if p >= 0.60:
+        return '偏贵', '#C2410C'
+    if p > 0.40:
+        return '中性', '#333'
+    if p > 0.20:
+        return '偏便宜', '#0E9F6E'
+    return '低估区', CLR_DOWN
+
+
+def signals_block(S):
+    """⑤ 市场环境四件套：指数估值 / 境内资金面 / ETF 折溢价 / 市场宽度。
+
+    四块彼此独立抓取，任何一块缺失就整块跳过（不留空表头）。
+    与看板 ⑨⑩⑪⑫ 面板同源，字段口径见 a-stock-api README §2。
+    """
+    if not S:
+        return ''
+    V, Q, P, BR = (S.get('valuation'), S.get('liquidity'),
+                   S.get('premium'), S.get('breadth'))
+    if not any((V, Q, P, BR)):
+        return ''
+
+    TBD = ('border="1" cellspacing="0" cellpadding="6" '
+           'style="border-collapse:collapse;font-size:12px;border-color:#DDD;width:100%;margin-top:6px"')
+    TH = '<tr style="background:#EFEFEF">'
+    bp = lambda v: '—' if v is None else ('%+.1f' % v) + ' bp'
+    bp_col = lambda v: '#333' if v is None else (CLR_UP if v > 0 else (CLR_DOWN if v < 0 else '#333'))
+
+    h = ('<div style="margin:0 0 18px"><h3 style="font-size:15px;margin:0 0 8px">'
+         '⑤ 市场环境监测 · 指数估值 / 境内资金面 / ETF 折溢价 / 市场宽度</h3>')
+    h += ('<div style="color:#666;font-size:11.5px;margin-bottom:3px">更新 %s　｜　'
+          '数据源：蛋卷基金（估值分位）· 中国货币网（SHIBOR / 银行间回购定盘）· '
+          '腾讯行情 + 东财净值（折溢价）· 东财涨停/跌停池（宽度）</div>'
+          % esc(S.get('updated') or '—'))
+
+    notes = []          # 末尾的「一句话综合提示」
+
+    # ── 5.1 规模指数估值 ────────────────────────────────────
+    rows = (V or {}).get('data') or []
+    if rows:
+        h += '<div style="font-size:12.5px;font-weight:600;margin-top:10px">5.1 规模指数估值 · PE / PB 历史分位</div>'
+        h += '<table %s>' % TBD
+        h += (TH + '<th>指数</th><th>PE</th><th>PE 历史分位</th><th>PB</th>'
+              '<th>PB 历史分位</th><th>ROE</th><th>股息率</th><th>估值状态</th></tr>')
+        for r in rows:
+            pp, bpv = r.get('pe_pct'), r.get('pb_pct')
+            wd, wc = _pct_word(pp)
+            h += ('<tr><td><b>%s</b><br><span style="color:#888;font-size:10.5px">%s</span></td>'
+                  '<td><b>%s</b></td>'
+                  '<td>%s<b style="color:%s">%s</b></td>'
+                  '<td>%s</td>'
+                  '<td>%s<b>%s</b></td>'
+                  '<td>%s</td><td>%s</td>'
+                  '<td style="color:%s"><b>%s</b></td></tr>'
+                  % (esc(r.get('name') or r.get('code') or '—'), esc(r.get('code') or ''),
+                     fmt(r.get('pe'), 2),
+                     _bar(pp, wc), wc, '—' if pp is None else '%.1f%%' % (pp * 100),
+                     fmt(r.get('pb'), 2),
+                     _bar(bpv, '#8A93A3'), '—' if bpv is None else '%.1f%%' % (bpv * 100),
+                     '—' if r.get('roe') is None else '%.2f%%' % (r['roe'] * 100),
+                     '—' if r.get('dividend_yield') is None else '%.2f%%' % (r['dividend_yield'] * 100),
+                     wc, wd))
+        h += '</table>'
+        seg = []
+        for r in rows:
+            pp = r.get('pe_pct')
+            if pp is not None:
+                seg.append('%s PE 分位 <b>%.1f%%</b>（%s）' % (
+                    esc(r.get('name') or r.get('code')), pp * 100, _pct_word(pp)[0]))
+        if seg:
+            notes.append('估值：' + '，'.join(seg) + '。分位 &gt;80% 为高估区、&lt;20% 为低估区，中间视为合理。')
+        h += ('<div style="font-size:11px;color:#777;margin-top:4px">'
+              'PE/PB 分位为「当前值在自身历史中的位置」，0% = 史上最便宜、100% = 史上最贵；'
+              'ROE 与股息率为上游原始值（小数已换算成 %）。</div>')
+
+    # ── 5.2 境内资金面 ──────────────────────────────────────
+    if Q:
+        lt = Q.get('latest') or {}
+        dv = Q.get('derived') or {}
+        h += '<div style="font-size:12.5px;font-weight:600;margin-top:12px">5.2 境内资金面 · 银行间资金价格（年化 %）</div>'
+        h += '<table %s>' % TBD
+        h += TH + '<th>指标</th><th>数值</th><th>指标</th><th>数值</th></tr>'
+        h += ('<tr><td>DR007 · 7 天回购定盘</td><td style="color:#C2410C"><b>%s%%</b></td>'
+              '<td>20 日均 / 偏离</td><td>%s%%　<span style="color:%s">%s</span></td></tr>'
+              % (fmt(lt.get('dr007'), 3), fmt(dv.get('dr007_ma20'), 3),
+                 bp_col(dv.get('dr007_vs_ma20_bp')), bp(dv.get('dr007_vs_ma20_bp'))))
+        h += ('<tr><td>DR001 · 隔夜</td><td><b>%s%%</b></td>'
+              '<td>FR001 · 银行间隔夜</td><td>%s%%</td></tr>'
+              % (fmt(lt.get('dr001'), 3), fmt(lt.get('fr001'), 3)))
+        h += ('<tr><td>SHIBOR 3M · 中期资金成本</td><td style="color:#2563EB"><b>%s%%</b></td>'
+              '<td>20 日变化</td><td style="color:%s">%s</td></tr>'
+              % (fmt(lt.get('shibor_3m'), 3),
+                 bp_col(dv.get('shibor_3m_chg_20d_bp')), bp(dv.get('shibor_3m_chg_20d_bp'))))
+        h += ('<tr><td>SHIBOR 1Y</td><td>%s%%</td>'
+              '<td>期限利差 3M − 隔夜</td><td style="color:%s">%s</td></tr>'
+              % (fmt(lt.get('shibor_1y'), 3),
+                 bp_col(dv.get('term_spread_3m_on_bp')), bp(dv.get('term_spread_3m_on_bp'))))
+        h += ('<tr><td>DR007 近 5 日变化</td><td style="color:%s">%s</td>'
+              '<td>数据日期</td><td>%s</td></tr>'
+              % (bp_col(dv.get('dr007_chg_5d_bp')), bp(dv.get('dr007_chg_5d_bp')),
+                 esc(lt.get('date') or '—')))
+        h += '</table>'
+        if lt.get('dr007') is not None:
+            d5 = dv.get('dr007_chg_5d_bp')
+            tone = '基本持平'
+            if d5 is not None:
+                tone = ('明显收紧' if d5 >= 10 else '小幅收紧' if d5 > 2
+                        else '明显转松' if d5 <= -10 else '小幅转松' if d5 < -2 else '基本持平')
+            notes.append('资金面：DR007 报 %.3f%%，近 5 日 %s（%s）—— 境内资金%s。'
+                         % (lt['dr007'], bp(d5), tone,
+                            '价格上行＝边际收紧，对高估值成长股不利' if (d5 or 0) > 2 else
+                            '价格下行＝边际转松，对权益估值有支撑' if (d5 or 0) < -2 else
+                            '水位平稳，不构成方向性驱动'))
+        h += ('<div style="font-size:11px;color:#777;margin-top:4px">'
+              'DR007 = 存款类机构质押式回购 7 天定盘利率，是央行公开市场操作实际盯的锚，比 SHIBOR 更贴近真实资金面；'
+              '上行＝收紧（红）、下行＝转松（绿）。</div>')
+
+    # ── 5.3 ETF 折溢价 ──────────────────────────────────────
+    rows = (P or {}).get('data') or []
+    if rows:
+        h += '<div style="font-size:12.5px;font-weight:600;margin-top:12px">5.3 ETF 折溢价 · 二级市场价 vs 单位净值</div>'
+        h += '<table %s>' % TBD
+        h += TH + '<th>代码</th><th>名称</th><th>现价</th><th>单位净值</th><th>溢价率</th><th>提示</th></tr>'
+        for r in rows:
+            pv = r.get('premium_pct')
+            if pv is None:
+                pc, tag = '#333', '净值缺失'
+            elif pv >= 1:
+                pc, tag = CLR_UP, '明显溢价'
+            elif pv >= 0.3:
+                pc, tag = '#C2410C', '小幅溢价'
+            elif pv <= -1:
+                pc, tag = CLR_DOWN, '明显折价'
+            elif pv <= -0.3:
+                pc, tag = '#0E9F6E', '小幅折价'
+            else:
+                pc, tag = '#333', '贴近净值'
+            if r.get('stale'):
+                tag += ' · 净值滞后'
+            h += ('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
+                  '<td style="color:%s"><b>%s%%</b></td><td style="color:%s">%s</td></tr>'
+                  % (esc(r.get('code') or ''), esc(r.get('name') or ''),
+                     fmt(r.get('price'), 3), fmt(r.get('nav'), 3),
+                     pc, sgn2(pv, 3), pc, esc(tag)))
+        h += '</table>'
+        hot = [r for r in rows if r.get('premium_pct') is not None and abs(r['premium_pct']) >= 1]
+        if hot:
+            notes.append('折溢价：%d 只 ETF 偏离净值超 1%%（%s）—— 溢价买入等于多付钱，'
+                         '折价则可能是流动性不足或事件冲击，下单前先看这一列。'
+                         % (len(hot), '、'.join('%s %s%%' % (r.get('code'), sgn2(r.get('premium_pct'), 2))
+                                                for r in hot)))
+        else:
+            notes.append('折溢价：全部 %d 只 ETF 均贴近净值（偏离 &lt;1%%），场内买贵/买便宜的风险可忽略。' % len(rows))
+        h += ('<div style="font-size:11px;color:#777;margin-top:4px">'
+              '溢价率 =（现价 − 单位净值）÷ 单位净值。正值＝场内更贵，负值＝场内更便宜；'
+              '净值按 T 日收盘计算，若标的当日停牌或 QDII 涉及时差会标注「净值滞后」。</div>')
+
+    # ── 5.4 市场宽度 ────────────────────────────────────────
+    t = (BR or {}).get('today') or {}
+    if t.get('total'):
+        up, dn, fl, tot = t.get('up') or 0, t.get('down') or 0, t.get('flat') or 0, t.get('total') or 0
+        up_pct = t.get('up_pct')
+        if up_pct is None and tot:
+            up_pct = up / tot * 100
+        h += '<div style="font-size:12.5px;font-weight:600;margin-top:12px">5.4 市场宽度 · 涨跌家数 / 涨停跌停 / 连板高度</div>'
+        # 红涨绿跌的三段占比条
+        wu = up / tot * 100 if tot else 0
+        wf = fl / tot * 100 if tot else 0
+        wd = dn / tot * 100 if tot else 0
+        h += ('<div style="margin-top:6px;height:9px;border-radius:5px;overflow:hidden;'
+              'background:#E8EAED;font-size:0">'
+              '<span style="display:inline-block;height:9px;width:%.2f%%;background:%s"></span>'
+              '<span style="display:inline-block;height:9px;width:%.2f%%;background:#BFC5CE"></span>'
+              '<span style="display:inline-block;height:9px;width:%.2f%%;background:%s"></span></div>'
+              % (wu, CLR_UP, wf, wd, CLR_DOWN))
+        h += '<table %s>' % TBD
+        h += TH + '<th>上涨</th><th>下跌</th><th>平盘</th><th>合计</th><th>涨停</th><th>跌停</th><th>最高连板</th></tr>'
+        h += ('<tr><td style="color:%s"><b>%d</b></td><td style="color:%s"><b>%d</b></td>'
+              '<td>%d</td><td>%d</td><td style="color:%s"><b>%s</b></td>'
+              '<td style="color:%s"><b>%s</b></td><td><b>%s 板</b></td></tr>'
+              % (CLR_UP, up, CLR_DOWN, dn, fl, tot,
+                 CLR_UP, t.get('limit_up') if t.get('limit_up') is not None else '—',
+                 CLR_DOWN, t.get('limit_down') if t.get('limit_down') is not None else '—',
+                 t.get('max_streak') if t.get('max_streak') is not None else '—'))
+        h += '</table>'
+        # 最近若干个交易日的自建序列（上游不支持按日查询，只能本仓库逐日累积）
+        hist = ((BR or {}).get('history') or [])[-6:]
+        if len(hist) > 1:
+            h += '<div style="font-size:12px;font-weight:600;margin-top:10px">近期宽度序列（本仓库逐日累积，共 %d 个交易日）</div>' % len(
+                (BR or {}).get('history') or [])
+            h += '<table %s>' % TBD
+            h += TH + '<th>日期</th><th>上涨</th><th>下跌</th><th>上涨占比</th><th>涨停</th><th>跌停</th><th>最高连板</th></tr>'
+            for r in hist:
+                rp = r.get('up_pct')
+                if rp is None and r.get('total'):
+                    rp = (r.get('up') or 0) / r['total'] * 100
+                h += ('<tr><td>%s</td><td style="color:%s">%s</td><td style="color:%s">%s</td>'
+                      '<td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
+                      % (esc(r.get('date') or '—'),
+                         CLR_UP, r.get('up', '—'), CLR_DOWN, r.get('down', '—'),
+                         '—' if rp is None else '%.1f%%' % rp,
+                         r.get('limit_up', '—'), r.get('limit_down', '—'),
+                         r.get('max_streak', '—')))
+            h += '</table>'
+        if up_pct is not None:
+            mood = ('普涨' if up_pct >= 70 else '多数上涨' if up_pct >= 55
+                    else '多空拉锯' if up_pct >= 45 else '多数下跌' if up_pct >= 30 else '普跌')
+            lu, ld = t.get('limit_up') or 0, t.get('limit_down') or 0
+            notes.append('宽度：%s 上涨 %d / 下跌 %d（上涨占比 <b>%.1f%%</b>，%s），'
+                         '涨停 %s / 跌停 %s、最高 %s 连板 —— %s。'
+                         % (esc(t.get('date') or ''), up, dn, up_pct, mood, lu, ld,
+                            t.get('max_streak', '—'),
+                            '赚钱效应扩散' if (up_pct >= 55 and lu > ld)
+                            else '个股承接弱，指数上涨未必有广泛基础' if up_pct < 45
+                            else '结构性行情，分化为主'))
+        h += ('<div style="font-size:11px;color:#777;margin-top:4px">'
+              '涨跌家数由东财「涨跌幅分布直方图」求和（与 push2 的 f104/f105/f106 交叉校验，差异 &lt;2%，'
+              '源于是否含北交所与停牌股）；涨停/跌停取对应池子的 tc 字段，连板高度取池内 lbc 最大值。'
+              '<b>上游三个接口只返回当日快照、忽略日期参数</b>，因此历史序列从接入当天起逐日累积，无法回填。</div>')
+        if up_pct is not None:
+            notes.append('宽度与 LSI 的组合用法：指数（① ②）在涨、但上涨占比 &lt;40%，说明是权重股撑指数、'
+                         '个股在跌 —— 这种分化最适合减仓而非加仓；反之指数横盘而宽度回升，往往是底部特征。')
+
+    # ── 5.5 一句话综合 ──────────────────────────────────────
+    if notes:
+        h += '<div style="background:#F4F6F8;border-left:4px solid #22D3EE;padding:10px 13px;' \
+             'border-radius:6px;font-size:12px;margin-top:11px;line-height:1.9">' \
+             '<b>⑤ 一句话综合</b><br>'
+        h += '<br>'.join('· ' + n for n in notes)
+        h += '</div>'
+
+    errs = S.get('errors') or []
+    if errs:
+        h += ('<div style="color:#B26A00;font-size:11px;margin-top:6px">'
+              '本次抓取有 %d 项失败（对应小节已省略）：%s</div>'
+              % (len(errs), esc('；'.join(errs))))
+    h += '</div>'
+    return h
+
+
 def build_message(subject, html, sender, recipients):
     """构造一封带内嵌图片的 HTML 邮件（收件人支持逗号分隔的多个地址）"""
     msg = EmailMessage()
@@ -313,6 +571,7 @@ def main():
         sys.exit(1)
     R = load('ratios.json')
     L = load('lsi.json')
+    S = load('signals.json')
 
     tk = summary['tracks']
     asof = summary.get('asof', '')
@@ -325,9 +584,21 @@ def main():
 
     H = '<div style="font-family:Microsoft YaHei,PingFang SC,Arial,sans-serif;font-size:13px;color:#222;max-width:1000px">'
     H += '<h2 style="font-size:18px;margin:0 0 10px">A股双宽基 ETF + 宏观 LSI 三合一日报 · %s</h2>' % esc(asof)
-    H += '<div style="color:#666;font-size:12px;margin-bottom:6px">沪深300：%s　｜　创业板：%s　｜　宏观：%s（报警 %s/%s 项）</div>' % (
+    # 顶部摘要额外带一眼宽度与估值分位：这两项是「指数涨但个股跌」这类背离的判据，
+    # 放在最上面比埋在 ⑤ 里更容易被看到。
+    _bt = (S or {}).get('breadth', {}).get('today') or {}
+    _extra = ''
+    if _bt.get('total'):
+        _up = _bt.get('up') or 0
+        _rp = _bt.get('up_pct')
+        if _rp is None:
+            _rp = _up / _bt['total'] * 100
+        _extra = '　｜　宽度：涨 %d / 跌 %d（上涨占比 %.1f%%，涨停 %s）' % (
+            _up, _bt.get('down') or 0, _rp,
+            _bt.get('limit_up') if _bt.get('limit_up') is not None else '—')
+    H += '<div style="color:#666;font-size:12px;margin-bottom:6px">沪深300：%s　｜　创业板：%s　｜　宏观：%s（报警 %s/%s 项）%s</div>' % (
         esc(h300.get('status', '—')), esc(cyb.get('status', '—')), esc(macro_txt),
-        L.get('alert_count', 0) if L else 0, L.get('total', 20) if L else 20)
+        L.get('alert_count', 0) if L else 0, L.get('total', 20) if L else 20, _extra)
 
     # 标题区追加：③ 三大风格轮动 & 股债性价比 · 历史百分位 的配置倾向
     if R and R.get('items'):
@@ -352,9 +623,10 @@ def main():
             H += track_block(tk[k], '①②③④⑤'[idx - 1] if idx <= 5 else str(idx))
     H += ratio_block(R)
     H += lsi_block(L)
+    H += signals_block(S)
     if os.path.exists(PNG):
-        H += '<div style="margin-top:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px">⑤ 高清三合一监测图</div><img src="cid:monitor" style="max-width:100%;border:1px solid #DDD;border-radius:8px"></div>'
-    H += '<div style="margin-top:18px;color:#888;font-size:11px;line-height:1.8">本邮件由 GitHub Actions 自动生成，数据源：腾讯自选股 westock-data（A股 ETF 份额/净值/指数）与美联储 FRED（宏观序列）。仅供个人研究参考，不构成任何投资建议。</div>'
+        H += '<div style="margin-top:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px">⑥ 高清三合一监测图</div><img src="cid:monitor" style="max-width:100%;border:1px solid #DDD;border-radius:8px"></div>'
+    H += '<div style="margin-top:18px;color:#888;font-size:11px;line-height:1.8">本邮件由 GitHub Actions 自动生成，数据源：腾讯自选股 westock-data（A股 ETF 份额/净值/指数）、美联储 FRED（宏观序列），以及 a-stock-api Worker 中转的蛋卷基金（估值）、中国货币网（SHIBOR/回购定盘）、东财（折溢价/涨停池）。仅供个人研究参考，不构成任何投资建议。</div>'
     H += '</div>'
 
     with open(PREVIEW, 'w', encoding='utf-8') as f:
