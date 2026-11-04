@@ -274,7 +274,8 @@ def signals_block(S):
         return ''
     V, Q, P, BR = (S.get('valuation'), S.get('liquidity'),
                    S.get('premium'), S.get('breadth'))
-    if not any((V, Q, P, BR)):
+    RT = S.get('rates')
+    if not any((V, Q, P, BR, RT)):
         return ''
 
     TBD = ('border="1" cellspacing="0" cellpadding="6" '
@@ -284,10 +285,11 @@ def signals_block(S):
     bp_col = lambda v: '#333' if v is None else (CLR_UP if v > 0 else (CLR_DOWN if v < 0 else '#333'))
 
     h = ('<div style="margin:0 0 18px"><h3 style="font-size:15px;margin:0 0 8px">'
-         '⑤ 市场环境监测 · 指数估值 / 境内资金面 / ETF 折溢价 / 市场宽度</h3>')
+         '⑤ 市场环境监测 · 指数估值 / 境内资金面 / 国债曲线 / ETF 折溢价 / 市场宽度</h3>')
     h += ('<div style="color:#666;font-size:11.5px;margin-bottom:3px">更新 %s　｜　'
           '数据源：蛋卷基金（估值分位）· 中国货币网（SHIBOR / 银行间回购定盘）· '
-          '腾讯行情 + 东财净值（折溢价）· 东财涨停/跌停池（宽度）</div>'
+          '东财国债到期收益率（曲线）· 腾讯行情 + 东财净值（折溢价）· '
+          '东财涨停/跌停池（宽度）</div>'
           % esc(S.get('updated') or '—'))
 
     notes = []          # 末尾的「一句话综合提示」
@@ -372,10 +374,55 @@ def signals_block(S):
               'DR007 = 存款类机构质押式回购 7 天定盘利率，是央行公开市场操作实际盯的锚，比 SHIBOR 更贴近真实资金面；'
               '上行＝收紧（红）、下行＝转松（绿）。</div>')
 
-    # ── 5.3 ETF 折溢价 ──────────────────────────────────────
+    # ── 5.3 国债收益率曲线 ──────────────────────────────────
+    if RT:
+        lt = RT.get('latest') or {}
+        dv = RT.get('derived') or {}
+        _sp = lambda v: '—' if v is None else '%+.1f bp' % (v * 100)
+        h += '<div style="font-size:12.5px;font-weight:600;margin-top:12px">5.3 国债收益率曲线 · 无风险利率与期限利差</div>'
+        h += '<table %s>' % TBD
+        h += TH + '<th>指标</th><th>数值</th><th>指标</th><th>数值</th></tr>'
+        _ma = dv.get('cn_10y_ma20')
+        _dev = ((lt.get('cn_10y') - _ma) * 100) if (lt.get('cn_10y') is not None and _ma is not None) else None
+        h += ('<tr><td><b>10Y 国债</b>（股债性价比分母）</td><td style="color:#B91C1C"><b>%s%%</b></td>'
+              '<td>20 日均 / 偏离</td><td>%s%%　<span style="color:%s">%s</span></td></tr>'
+              % (fmt(lt.get('cn_10y'), 3), fmt(_ma, 3), bp_col(_dev), bp(_dev)))
+        h += ('<tr><td>2Y 国债（短端，贴政策利率）</td><td><b>%s%%</b></td>'
+              '<td>5Y 国债</td><td>%s%%</td></tr>'
+              % (fmt(lt.get('cn_2y'), 3), fmt(lt.get('cn_5y'), 3)))
+        h += ('<tr><td>30Y 国债（长端，含增长预期）</td><td><b>%s%%</b></td>'
+              '<td>10Y 近 20 日变化</td><td style="color:%s">%s</td></tr>'
+              % (fmt(lt.get('cn_30y'), 3), bp_col(dv.get('cn_10y_chg_20d_bp')),
+                 bp(dv.get('cn_10y_chg_20d_bp'))))
+        h += ('<tr><td>10Y − 2Y 期限利差</td><td style="color:%s"><b>%s</b></td>'
+              '<td>5Y−2Y / 30Y−10Y</td><td>%s / %s</td></tr>'
+              % (bp_col(dv.get('cn_10y_2y_chg_20d_bp')), _sp(lt.get('cn_10y_2y')),
+                 _sp(lt.get('cn_5y_2y')), _sp(lt.get('cn_30y_10y'))))
+        _shape = '—'
+        if dv.get('inverted') is True:
+            _shape = '倒挂（10Y &lt; 2Y）'
+        elif lt.get('cn_10y_2y') is not None:
+            _shape = '正常陡峭' if lt['cn_10y_2y'] > 0.005 else '平坦'
+        h += ('<tr><td>曲线形态</td><td>%s</td><td>数据日期</td><td>%s</td></tr>'
+              % (_shape, esc(lt.get('date') or '—')))
+        h += '</table>'
+        if lt.get('cn_10y') is not None:
+            _d20 = dv.get('cn_10y_chg_20d_bp')
+            notes.append('国债：10Y %s%%（近 20 日 %s），2Y %s%%、30Y %s%%，10Y−2Y 利差 %s —— %s。'
+                         '长端下行＝无风险利率走低，对权益估值是分母端的支撑；'
+                         '利差走阔多对应宽松预期升温，走平/倒挂则偏谨慎。'
+                         % (fmt(lt.get('cn_10y'), 3), bp(_d20), fmt(lt.get('cn_2y'), 3),
+                            fmt(lt.get('cn_30y'), 3), _sp(lt.get('cn_10y_2y')),
+                            _shape if _shape != '—' else '数据不足'))
+        h += ('<div style="font-size:11px;color:#777;margin-top:4px">'
+              '与 5.2 的区别：5.2 是银行间「资金价格」（短端、政策驱动，看紧不紧）；'
+              '本节是「国债到期收益率」（整条曲线、含增长与通胀预期，看贵不贵）。'
+              '算股债性价比时分母用的是 10Y 国债，不是 DR007。</div>')
+
+    # ── 5.4 ETF 折溢价 ──────────────────────────────────────
     rows = (P or {}).get('data') or []
     if rows:
-        h += '<div style="font-size:12.5px;font-weight:600;margin-top:12px">5.3 ETF 折溢价 · 二级市场价 vs 单位净值</div>'
+        h += '<div style="font-size:12.5px;font-weight:600;margin-top:12px">5.4 ETF 折溢价 · 二级市场价 vs 单位净值</div>'
         h += '<table %s>' % TBD
         h += TH + '<th>代码</th><th>名称</th><th>现价</th><th>单位净值</th><th>溢价率</th><th>提示</th></tr>'
         for r in rows:
@@ -419,7 +466,7 @@ def signals_block(S):
         up_pct = t.get('up_pct')
         if up_pct is None and tot:
             up_pct = up / tot * 100
-        h += '<div style="font-size:12.5px;font-weight:600;margin-top:12px">5.4 市场宽度 · 涨跌家数 / 涨停跌停 / 连板高度</div>'
+        h += '<div style="font-size:12.5px;font-weight:600;margin-top:12px">5.5 市场宽度 · 涨跌家数 / 涨停跌停 / 连板高度</div>'
         # 红涨绿跌的三段占比条
         wu = up / tot * 100 if tot else 0
         wf = fl / tot * 100 if tot else 0
