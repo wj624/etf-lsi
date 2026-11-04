@@ -122,6 +122,17 @@ def main():
     L = load('lsi.json')
     if L:
         DATA['lsi'] = L
+    S = load('signals.json')
+    if S:
+        # 只做「有就传、没有就整块不出现」的处理：任一子项缺失都不影响其它面板。
+        sig = {'updated': S.get('updated', '')}
+        for k in ('valuation', 'liquidity', 'premium', 'breadth'):
+            if S.get(k):
+                sig[k] = S[k]
+        if S.get('errors'):
+            sig['errors'] = S['errors']
+        if len(sig) > 1:
+            DATA['signals'] = sig
 
     JS = json.dumps(DATA, ensure_ascii=False)
 
@@ -202,6 +213,31 @@ border-radius:10px;padding:12px 15px;margin-bottom:16px;font-size:13px}
 .barwrap .hi{position:absolute;right:0;top:0;bottom:0;width:20%;background:rgba(232,69,60,.20)}
 .barwrap .mk{position:absolute;top:-3px;bottom:-3px;width:3px;background:#fff;border-radius:2px}
 .rbox .kv{display:flex;justify-content:space-between;font-size:11.8px;color:var(--sub)}
+
+/* ── ⑨~⑫ 市场环境面板 ─────────────────────────────── */
+.mgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+.mbox{background:var(--panel2);border:1px solid var(--grid);border-radius:11px;padding:13px 15px}
+.mbox .t{font-size:13px;font-weight:600;margin-bottom:3px;display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.mbox .t .tag{font-size:11px;font-weight:400;color:var(--sub);font-family:Consolas,monospace}
+.hl{height:9px;border-radius:5px;margin:9px 0 6px;position:relative;
+background:linear-gradient(90deg,#1FB37A 0%,#5FA83A 30%,#C9A227 55%,#E0713C 78%,#E8453C 100%)}
+.hl i{position:absolute;top:-4px;width:3px;height:17px;background:#fff;border-radius:2px;box-shadow:0 0 0 1px #0006}
+.hlscale{display:flex;justify-content:space-between;font-size:10.5px;color:#6b7484;font-family:Consolas,monospace}
+.mrow{display:flex;justify-content:space-between;font-size:12px;padding:3px 0;border-bottom:1px dashed #262B34}
+.mrow:last-child{border-bottom:none}
+.mrow span:first-child{color:var(--sub)}
+.mrow b{font-family:Consolas,monospace;font-weight:600}
+.wbar{display:flex;height:30px;border-radius:6px;overflow:hidden;margin:10px 0 6px;font-size:11.5px;line-height:30px;color:#0d0f13;font-weight:700}
+.wbar div{text-align:center;overflow:hidden;white-space:nowrap}
+.wleg{display:flex;gap:16px;font-size:11.5px;color:var(--sub);flex-wrap:wrap}
+.wleg i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+.prow{display:grid;grid-template-columns:88px 1fr 66px;align-items:center;gap:9px;font-size:12px;padding:3px 0}
+.prow .nm{color:var(--sub);font-family:Consolas,monospace}
+.ptrack{position:relative;height:16px;background:#15181D;border-radius:4px;overflow:hidden}
+.ptrack .zero{position:absolute;top:0;bottom:0;width:1px;background:#3a4150}
+.ptrack .fill{position:absolute;top:2px;bottom:2px;border-radius:3px}
+.prow .vv{text-align:right;font-family:Consolas,monospace;font-weight:600}
+
 .diag{background:var(--panel2);border:1px solid var(--grid);border-left:3px solid var(--cyan);
 border-radius:10px;padding:12px 15px;margin-bottom:10px;font-size:12.8px;line-height:1.9;white-space:pre-wrap}
 .diag .h{color:var(--cyan);font-weight:700}
@@ -275,6 +311,33 @@ border-radius:10px;padding:12px 15px;margin-bottom:10px;font-size:12.8px;line-he
 <div class="panel" id="diagPanel" style="display:none">
   <h2>⑧ 四维全景合成诊断（资金动态 → 一阶宏观周期 → 二阶流动性水位 → 三阶微观定价）</h2>
   <div id="diagBox"></div>
+</div>
+
+<div class="panel" id="liqCnPanel" style="display:none">
+  <h2>⑨ 境内资金面（DR007 / SHIBOR）· 与 ⑤ 的境外流动性互为对照</h2>
+  <div class="hint" id="liqCnHint"></div>
+  <svg id="liqCnChart" viewBox="0 0 1000 300"></svg>
+  <div class="cards" id="liqCnCards"></div>
+</div>
+
+<div class="panel" id="breadthPanel" style="display:none">
+  <h2>⑩ 市场宽度（涨跌家数 / 涨停跌停 / 连板高度）</h2>
+  <div class="hint" id="breadthHint"></div>
+  <div class="cards" id="breadthCards"></div>
+  <div id="breadthBar"></div>
+  <svg id="breadthChart" viewBox="0 0 1000 220"></svg>
+</div>
+
+<div class="panel" id="valPanel" style="display:none">
+  <h2>⑪ 指数估值分位（PE / PB · 数据源：蛋卷基金）</h2>
+  <div class="hint" id="valHint"></div>
+  <div id="valBox"></div>
+</div>
+
+<div class="panel" id="premPanel" style="display:none">
+  <h2>⑫ ETF 折溢价（二级市场价 vs 单位净值）</h2>
+  <div class="hint" id="premHint"></div>
+  <div id="premBox"></div>
 </div>
 
 <div id="shareBlocks"></div>
@@ -788,6 +851,246 @@ for (const k of D.order) {
     '<div style="overflow-x:auto"><table>'+h+'</table></div></div>';
 }
 $('shareBlocks').innerHTML = sh;
+
+/* ══════════ ⑨ 境内资金面 ══════════ */
+(function renderCnLiquidity(){
+  const S = D.signals;
+  if (!S || !S.liquidity) return;
+  const L = S.liquidity;
+  let rows = (L.data || []).filter(r => r && r.date);
+  // 中国货币网两个接口的回溯长度不一样：SHIBOR 能给到 60+ 天，而回购定盘（DR007）
+  // 只回最近约 1 个月且忽略 startDate。若照原样从头画，左侧会有一大段
+  // 「只有 SHIBOR、没有 DR007」的空白，主次颠倒。从首个 DR007 有效点起画。
+  let i0 = -1;
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i].dr007 !== null && rows[i].dr007 !== undefined) { i0 = i; break; }
+  }
+  if (i0 > 0) rows = rows.slice(i0);
+  if (rows.length < 5) return;
+  $('liqCnPanel').style.display = '';
+
+  const lt = L.latest || {}, dv = L.derived || {};
+  $('liqCnHint').innerHTML = '银行间资金价格，单位为年化 %。DR007 是央行公开市场操作实际盯的锚，'
+    + '比 SHIBOR 更能代表真实资金面 —— <b>曲线下行＝资金转松，上行＝收紧</b>。'
+    + '⑨ 与 ⑤ 合起来才是完整流动性环境：⑤ 看境外（美联储），⑨ 看境内。'
+    + (lt.date ? '　最新 ' + esc(lt.date) : '')
+    + '　<b>数据源：中国货币网</b>（SHIBOR 八期限 + 银行间质押式回购定盘 FR/FDR）。';
+
+  const bp = v => (v === null || v === undefined) ? '—' : (v > 0 ? '+' : '') + Number(v).toFixed(1) + ' bp';
+  // 资金利率上行＝收紧＝红；下行＝转松＝绿（沿用 A 股红涨绿跌）
+  const bpCol = v => (v === null || v === undefined) ? 'var(--sub)' : (v > 0 ? 'var(--up)' : (v < 0 ? 'var(--down)' : 'var(--txt)'));
+
+  let ch = '';
+  ch += '<div class="card"><div class="k">DR007 · 7天回购定盘</div>'
+      + '<div class="v" style="color:var(--orange)">' + fmt(lt.dr007, 3) + '%</div>'
+      + '<div class="d">20 日均 ' + fmt(dv.dr007_ma20, 3) + '｜偏离 <span style="color:' + bpCol(dv.dr007_vs_ma20_bp) + '">'
+      + bp(dv.dr007_vs_ma20_bp) + '</span></div></div>';
+  ch += '<div class="card"><div class="k">DR001 · 隔夜</div>'
+      + '<div class="v" style="color:var(--cyan)">' + fmt(lt.dr001, 3) + '%</div>'
+      + '<div class="d">FR001 ' + fmt(lt.fr001, 3) + '%｜5 日 DR007 <span style="color:' + bpCol(dv.dr007_chg_5d_bp) + '">'
+      + bp(dv.dr007_chg_5d_bp) + '</span></div></div>';
+  ch += '<div class="card"><div class="k">SHIBOR 3M · 中期资金成本</div>'
+      + '<div class="v" style="color:var(--blue)">' + fmt(lt.shibor_3m, 3) + '%</div>'
+      + '<div class="d">20 日变化 <span style="color:' + bpCol(dv.shibor_3m_chg_20d_bp) + '">'
+      + bp(dv.shibor_3m_chg_20d_bp) + '</span>｜1Y ' + fmt(lt.shibor_1y, 3) + '%</div></div>';
+  ch += '<div class="card"><div class="k">期限利差 3M − 隔夜</div>'
+      + '<div class="v" style="color:var(--txt)">' + bp(dv.term_spread_3m_on_bp) + '</div>'
+      + '<div class="d">走阔＝机构提前备付、资金预期偏紧</div></div>';
+  $('liqCnCards').innerHTML = ch;
+
+  const W = 1000, H = 300, Lf = 54, R = 78, Tp = 14, B = 30;
+  const n = rows.length;
+  const X = i => Lf + i * (W - Lf - R) / Math.max(1, n - 1);
+  const series = [
+    {key: 'dr007', name: 'DR007', col: '#FF8A1F', w: 2.2},
+    {key: 'shibor_3m', name: 'SHIBOR 3M', col: '#4C9AFF', w: 1.6},
+    {key: 'shibor_on', name: '隔夜', col: '#8A93A3', w: 1.2, dash: '4 3'}
+  ];
+  let vals = [];
+  for (const s of series) for (const r of rows) {
+    const v = r[s.key];
+    if (v !== null && v !== undefined && !isNaN(v)) vals.push(v);
+  }
+  if (!vals.length) return;
+  let mn = Infinity, mx = -Infinity;
+  for (const v of vals) { if (v < mn) mn = v; if (v > mx) mx = v; }
+  const pd0 = (mx - mn) * 0.2 || 0.05; mn -= pd0; mx += pd0;
+  const Y = v => Tp + (mx - v) / (mx - mn) * (H - B - Tp);
+
+  let g = '';
+  for (let k = 0; k <= 4; k++) {
+    const y = Tp + k * (H - B - Tp) / 4, v = mx - (mx - mn) * k / 4;
+    g += '<line x1="' + Lf + '" y1="' + y + '" x2="' + (W - R) + '" y2="' + y + '" stroke="#2A2F39" stroke-width="1"/>'
+      + '<text x="' + (Lf - 8) + '" y="' + (y + 4) + '" fill="#8A93A3" font-size="10.5" text-anchor="end" '
+      + 'font-family="Consolas">' + v.toFixed(2) + '</text>';
+  }
+  for (const s of series) {
+    let d = '', on = false;
+    for (let i = 0; i < n; i++) {
+      const v = rows[i][s.key];
+      if (v === null || v === undefined || isNaN(v)) { on = false; continue; }
+      d += (on ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(v).toFixed(1) + ' ';
+      on = true;
+    }
+    if (!d) continue;
+    g += '<path d="' + d + '" fill="none" stroke="' + s.col + '" stroke-width="' + s.w + '"'
+      + (s.dash ? ' stroke-dasharray="' + s.dash + '"' : '') + ' stroke-linejoin="round"/>';
+    const lr = rows[n - 1];
+    if (lr && lr[s.key] !== null && lr[s.key] !== undefined) {
+      g += '<circle cx="' + X(n - 1) + '" cy="' + Y(lr[s.key]) + '" r="3" fill="' + s.col + '"/>'
+        + '<text x="' + (X(n - 1) + 7) + '" y="' + (Y(lr[s.key]) + 4) + '" fill="' + s.col
+        + '" font-size="11" font-family="Consolas">' + s.name + '</text>';
+    }
+  }
+  g += '<text x="' + Lf + '" y="' + (H - 8) + '" fill="#6b7484" font-size="10.5" font-family="Consolas">' + esc(rows[0].date) + '</text>'
+    + '<text x="' + (W - R) + '" y="' + (H - 8) + '" fill="#6b7484" font-size="10.5" text-anchor="end" font-family="Consolas">' + esc(rows[n - 1].date) + '</text>';
+  $('liqCnChart').innerHTML = g;
+})();
+
+/* ══════════ ⑩ 市场宽度 ══════════ */
+(function renderBreadth(){
+  const S = D.signals;
+  if (!S || !S.breadth) return;
+  const BR = S.breadth, t = BR.today || {};
+  if (!t.total) return;
+  $('breadthPanel').style.display = '';
+
+  $('breadthHint').innerHTML = '涨跌家数由「涨跌幅分布直方图」求和得到（已与东财 push2 的 f104/f105/f106 交叉校验，差异 <2%，'
+    + '源于是否含北交所与停牌股）；涨停/跌停取涨停池、跌停池的 tc 字段；最高连板高度取池内 lbc 最大值。'
+    + '<b>上游三个接口只返回当日快照、不支持按日期查询</b>，所以本仓库只能每天存一份，历史序列从上线当天开始积累。'
+    + (t.is_today ? '　<span style="color:#F5A623">当日为盘中实时值，收盘前会变动</span>' : '');
+
+  const card = (k, v, col, d) => '<div class="card"><div class="k">' + k + '</div>'
+    + '<div class="v" style="color:' + col + '">' + v + '</div><div class="d">' + d + '</div></div>';
+  let ch = '';
+  ch += card('上涨家数', t.up, 'var(--up)', '占比 ' + fmt(t.up_pct, 1) + '%');
+  ch += card('下跌家数', t.down, 'var(--down)', '平盘 ' + (t.flat === null || t.flat === undefined ? '—' : t.flat) + ' 家');
+  ch += card('涨停 / 跌停', (t.limit_up === null ? '—' : t.limit_up) + ' / ' + (t.limit_down === null ? '—' : t.limit_down),
+    'var(--orange)', '涨停家数含一字板与新上市');
+  ch += card('最高连板', (t.max_streak || 0) + ' 板', 'var(--purple)', '连板高度＝情绪温度计');
+  $('breadthCards').innerHTML = ch;
+
+  const tot = t.total || 1;
+  const pw = x => (x / tot * 100).toFixed(2);
+  $('breadthBar').innerHTML =
+    '<div class="wbar">'
+    + '<div style="width:' + pw(t.up) + '%;background:#E8453C">' + (t.up / tot > 0.08 ? t.up : '') + '</div>'
+    + '<div style="width:' + pw(t.flat) + '%;background:#6b7484">' + (t.flat / tot > 0.08 ? t.flat : '') + '</div>'
+    + '<div style="width:' + pw(t.down) + '%;background:#1FB37A">' + (t.down / tot > 0.08 ? t.down : '') + '</div>'
+    + '</div>'
+    + '<div class="wleg"><span><i style="background:#E8453C"></i>上涨 ' + t.up + '</span>'
+    + '<span><i style="background:#6b7484"></i>平盘 ' + t.flat + '</span>'
+    + '<span><i style="background:#1FB37A"></i>下跌 ' + t.down + '</span>'
+    + '<span>合计 ' + t.total + ' 只（' + esc(t.date || '') + '）</span></div>';
+
+  const hist = (BR.history || []).filter(r => r && r.up_pct !== null && r.up_pct !== undefined);
+  if (hist.length < 5) {
+    // 历史不够时不占 220px 的大空白，收成一条 90px 的说明条，页面更紧凑
+    $('breadthChart').setAttribute('viewBox', '0 0 1000 90');
+    $('breadthChart').innerHTML = '<text x="500" y="46" fill="#6b7484" font-size="12" text-anchor="middle">'
+      + '历史仅 ' + hist.length + ' 天，满 5 天后自动显示「上涨占比」趋势（每次运行累积一天，也可本地补跑）</text>';
+    return;
+  }
+  $('breadthChart').setAttribute('viewBox', '0 0 1000 220');
+  const W = 1000, H = 220, Lf = 48, R = 60, Tp = 14, B = 26;
+  const n = hist.length;
+  const X = i => Lf + i * (W - Lf - R) / Math.max(1, n - 1);
+  const Y = v => Tp + (100 - v) / 100 * (H - B - Tp);
+  let g = '';
+  for (let k = 0; k <= 4; k++) {
+    const y = Tp + k * (H - B - Tp) / 4, v = 100 - 25 * k;
+    g += '<line x1="' + Lf + '" y1="' + y + '" x2="' + (W - R) + '" y2="' + y + '" stroke="#2A2F39" stroke-width="1"/>'
+      + '<text x="' + (Lf - 8) + '" y="' + (y + 4) + '" fill="#8A93A3" font-size="10.5" text-anchor="end" '
+      + 'font-family="Consolas">' + v + '%</text>';
+  }
+  g += '<line x1="' + Lf + '" y1="' + Y(50) + '" x2="' + (W - R) + '" y2="' + Y(50) + '" stroke="#6b7484" stroke-width="1" stroke-dasharray="4 3"/>';
+  let d = '';
+  for (let i = 0; i < n; i++) d += (i ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(hist[i].up_pct).toFixed(1) + ' ';
+  g += '<path d="' + d + '" fill="none" stroke="#E8453C" stroke-width="2" stroke-linejoin="round"/>';
+  const lr = hist[n - 1];
+  g += '<circle cx="' + X(n - 1) + '" cy="' + Y(lr.up_pct) + '" r="3.5" fill="#E8453C"/>'
+    + '<text x="' + (X(n - 1) + 7) + '" y="' + (Y(lr.up_pct) + 4) + '" fill="#E8453C" font-size="11" '
+    + 'font-family="Consolas">' + fmt(lr.up_pct, 1) + '%</text>'
+    + '<text x="' + Lf + '" y="' + (H - 6) + '" fill="#6b7484" font-size="10.5" font-family="Consolas">' + esc(hist[0].date) + '</text>'
+    + '<text x="' + (W - R) + '" y="' + (H - 6) + '" fill="#6b7484" font-size="10.5" text-anchor="end" font-family="Consolas">' + esc(lr.date) + '</text>';
+  $('breadthChart').innerHTML = g;
+})();
+
+/* ══════════ ⑪ 指数估值分位 ══════════ */
+(function renderValuation(){
+  const S = D.signals;
+  if (!S || !S.valuation) return;
+  const V = S.valuation, rows = V.data || [];
+  if (!rows.length) return;
+  $('valPanel').style.display = '';
+
+  $('valHint').innerHTML = 'PE/PB 的历史分位（0%＝历史最便宜，100%＝最贵），分位越高越贵。'
+    + '刻度条的白线就是当前分位。<b>口径注意</b>：pe_pct 即上游 <code>pe_percentile</code>，'
+    + '而 <code>pe_over_history</code> 是它的互补值（1 − pe_pct），两者互为倒数关系，本页只用前者。'
+    + '　数据源：蛋卷基金（替代被 401 拦下的 legulegu）。';
+
+  const pctCol = p => (p === null || p === undefined) ? 'var(--sub)'
+    : (p >= 0.8 ? 'var(--up)' : (p <= 0.2 ? 'var(--down)' : '#F5A623'));
+  const pctTxt = p => (p === null || p === undefined) ? '—' : (p * 100).toFixed(1) + '%';
+
+  let h = '<div class="mgrid">';
+  for (const r of rows) {
+    const pp = r.pe_pct, pb = r.pb_pct;
+    h += '<div class="mbox">'
+      + '<div class="t"><span>' + esc(r.name || r.code) + '</span><span class="tag">' + esc(r.date || '') + '</span></div>'
+      + '<div class="hl"><i style="left:calc(' + ((pp === null || pp === undefined ? 50 : pp * 100)).toFixed(1) + '% - 1px)"></i></div>'
+      + '<div class="hlscale"><span>0% 便宜</span><span>50%</span><span>贵 100%</span></div>'
+      + '<div class="mrow"><span>PE（分位）</span><b style="color:' + pctCol(pp) + '">' + fmt(r.pe, 2)
+      + '（' + pctTxt(pp) + '）</b></div>'
+      + '<div class="mrow"><span>PB（分位）</span><b style="color:' + pctCol(pb) + '">' + fmt(r.pb, 3)
+      + '（' + pctTxt(pb) + '）</b></div>'
+      + '<div class="mrow"><span>ROE / 股息率</span><b>'
+      + (r.roe === null || r.roe === undefined ? '—' : (r.roe * 100).toFixed(2) + '%') + ' / '
+      + (r.dividend_yield === null || r.dividend_yield === undefined ? '—' : (r.dividend_yield * 100).toFixed(2) + '%') + '</b></div>'
+      + '<div class="mrow"><span>PEG / 估值评级</span><b>' + fmt(r.peg, 2) + ' / '
+      + esc(r.level === 'low' ? '低' : r.level === 'high' ? '高' : r.level === 'mid' ? '中' : (r.level || '—')) + '</b></div>'
+      + '</div>';
+  }
+  h += '</div>';
+  $('valBox').innerHTML = h;
+})();
+
+/* ══════════ ⑫ ETF 折溢价 ══════════ */
+(function renderPremium(){
+  const S = D.signals;
+  if (!S || !S.premium) return;
+  const P = S.premium, rows = P.data || [];
+  if (!rows.length) return;
+  $('premPanel').style.display = '';
+
+  const stale = rows.some(r => r.stale);
+  $('premHint').innerHTML = '折溢价 =（二级市场价 − 单位净值）/ 单位净值 × 100。'
+    + '<b>溢价（红）＝场内买盘更强，折价（绿）＝场内抛压更重</b>，刻度以 0 为中心、±1% 满格。'
+    + '注意这里用的是<b>收盘价与当日净值</b>，不是盘中实时 IOPV；'
+    + (stale ? '<span style="color:#F5A623">当前存在「价格日期 ≠ 净值日期」的标的（净值尚未更新），该行数值只反映相对上一日净值的偏离，参考价值有限。</span>'
+      : '当前价格与净值同日，数值可直接参考。')
+    + '　数据源：腾讯行情 + 东财净值。';
+
+  const LIM = 1.0;
+  let h = '';
+  for (const r of rows) {
+    const v = r.premium_pct;
+    const av = (v === null || v === undefined) ? 0 : Math.min(Math.abs(v) / LIM, 1);
+    const w = av * 50;
+    const col = (v === null || v === undefined) ? '#6b7484' : (v >= 0 ? 'var(--up)' : 'var(--down)');
+    const left = (v === null || v === undefined || v >= 0) ? 50 : 50 - w;
+    h += '<div class="prow"><span class="nm">' + esc(r.code) + '</span>'
+      + '<div class="ptrack"><div class="zero" style="left:50%"></div>'
+      + '<div class="fill" style="left:' + left.toFixed(2) + '%;width:' + Math.max(w, 0.4).toFixed(2)
+      + '%;background:' + col + '"></div></div>'
+      + '<span class="vv" style="color:' + col + '">'
+      + (v === null || v === undefined ? '—' : (v >= 0 ? '+' : '') + v.toFixed(3) + '%')
+      + (r.stale ? '<span style="color:#F5A623;font-size:10px"> *</span>' : '') + '</span></div>';
+  }
+  const nm = {}; for (const r of rows) nm[r.code] = r.name;
+  h += '<div class="foot" style="margin-top:8px">' + rows.map(r => esc(r.code) + ' ' + esc(nm[r.code] || '')).join('　｜　') + '</div>';
+  $('premBox').innerHTML = h;
+})();
 
 /* ---------- 页脚 ---------- */
 $('footNote').innerHTML =
