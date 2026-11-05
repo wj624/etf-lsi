@@ -1037,3 +1037,124 @@ commit message 用中文，说明「改了什么 + 为什么」，涉及口径�
 遵循 A 股习惯 **红涨绿跌**：净申购 / 正 Spread / 报警触发 → 红色 `#E8453C`；
 净赎回 / 负 Spread / 正常未触发 → 绿色 `#1FB37A`。
 （注意这与欧美「绿涨红跌」相反。）
+
+---
+
+## 附录 · 2026-11-05 全量整改记录（给维护者 / 给 AI 读）
+
+> **这一节是什么**：AI 维护助手在 2026-11-05 对账号下 6 个仓库做完一次「大范围彻底修复」后追加的说明。目的只有一个——**让下一次维护（不管人或 AI）能看懂每个改动为什么做、哪些绝对不能回退**。
+>
+> **怎么读**：改任何代码之前，先读本 README 前文的「维护须知 / 铁律 / 给 AI 的维护提示词」，再读本附录。**两者冲突时以前文铁律为准**；本附录只解释本次改动，不新增、不覆盖任何设计口径。
+>
+> **本次原则**：用户要求「稳定、基本无维护、占用空间少、不自动生成垃圾」，并明确「修改前先看 README 的设计思路与维护须知」。因此本次只修**确定性 bug、静默失败、危险工作流行为、文档与代码不一致、依赖版本失控、运行时垃圾文件**；**没有做架构改造，没有删任何数据资产，没有改任何口径/阈值/单位/cron/构建顺序**。
+>
+> **本次改动范围**：6 仓共 40 个文件、0 删除；逐仓白名单精确提交，全程无 `--force`、无 rebase 冲突。**上线后的串行补测又追加了一次 pandas 3.x 兼容性修复（3 仓 6 文件，见 F 节），所以最终线上状态以 F 节为准，A 表里凡是写 `pandas<4` 的地方都已收紧为 `pandas<3`**。
+
+### A. 本次改了什么（逐文件）
+
+| 文件 | 原始缺陷（为什么必须改） | 本次修法 | 依据 / 约束 |
+|---|---|---|---|
+| `common.py`（4 处） | 导入期就执行 `NODE = find_node()` / `IDX = os.path.join(find_skill(), ...)`，且硬编码 3 条 **Windows 本机绝对路径**；只想用字体/表格工具的模块（`render.py` 等）也会因缺 node 崩掉 | 删本机绝对路径；`find_node()` / `find_skill()` 缺依赖返回 `''`，**导入期不再抛错**；`run()` 在真正取数时缺依赖则**显式 `RuntimeError`**——刻意不返回空串，避免下游 `first_table` / `split_by_code` 把空串变成 `None` 静默写进数据资产 | §9 防 Bug 铁律、§12.5 硬约束（不用空数据顶替）；`westock-data` 不能删 |
+| `check_lsi_status.py` | **数据完整性闸门**读 `lsi.json` 失败只打 warning，仍可能 0 退出，坏数据会放行 | 改 `error` 且 `bad = 1`（非 0 退出） | README 明确它是「数据完整性闸门」 |
+| `fetch_data.py` | 单日抓取失败 / 缓存不可用被静默吞掉 | 升级为 `::warning::`（CI 可见），不改回退链 | 取数容错链路 |
+| `.github/workflows/daily.yml`（4 处） | `actions/cache` 的 key 用 `github.run_id`（每次不同，**缓存永不命中**）；`rebase` 失败 `exit 0` 假装成功；缺缓存文件静默；Pages 未生成看板 `exit 0` | key 改稳定 `hashFiles('requirements.txt')`；rebase 失败 `exit 1` + `::error::`；缺缓存改 warning（降级模块可容忍）；Pages 未生成看板 `exit 1` | gh-pages + Cloudflare Pages 双发布链路**保留**（README 未授权删） |
+| `.github/workflows/monthly-snapshot.yml` | 每月自动 force 重写历史，会抹掉 `_exchange_shares.json` 等数据资产历史 | **停用 `schedule`**，保留 `workflow_dispatch`；guard 增加 `*.json` 校验；回滚 SHA `retention-days` 90 → 365 | 不删文件、不改主体 |
+| `requirements.txt` | 依赖无上界 | `matplotlib<4` / `numpy<3` / `requests<3` / `openpyxl<4` | 「只保留四个依赖」口径 |
+| `.gitignore` | `.env.example` 声称 `.env` 已被忽略，实际没有 | 追加 `.env` | 凭证不进代码 |
+| `README.md` | 19:00 应为 21:17；「强制重抓最后 8 个交易日」应为 5；90 天应为 14 天；件套数不统一；重复 `LSI_CAL_DAYS 820`；指向已删私有库 `wj624/etf-lsi-monitor`；目录缺十二、十三；「五个必踩坑」实为六个 | 逐项订正 | §9 防 Bug 铁律 8 条、§12.4 SOP、§12.5 硬约束**全部保留** |
+
+### B. 本次坚决没改（硬约束，改了就是破坏设计）
+
+- **`_is_stale` 不捆绑 `nav`**；**`chg[i] = shares[i] − shares[i−1]`** 未改。
+- **`IORB` 必须同时在 `FRED_SERIES`（`config.py`）与 `_CAL_EXCLUDE`（`fetch_fred_lsi.py`）里**。
+- **`http_json(url, csv_id=...)` 的 CSV 兜底不能删**；上交所份额「开工探测 + 两轮 + 熔断」不能简化。
+- **不允许用前一交易日份额顶替缺失日**；利差单位是 `%` 不是 bp。
+- **`_exchange_shares.json` 与 `_breadth_history.json` 必须随仓库提交**；`westock-data` 保留。
+- **cron 21:17、`TZ=Asia/Shanghai` 保留**；gh-pages / Cloudflare Pages 双发布链路保留。
+
+### C. 明令作废的旧建议（别再走回头路）
+
+第一轮「只读体检报告」里提出过若干架构建议，**读完各仓 README 的维护须知后已全部作废**，本次一个都没采纳：
+
+- ❌ **「产物不入库 / 数据与页面不进 git」**：本仓产物是 Pages / EdgeOne Pages / GAS 的**数据源本身**，从仓库检出，必须入库。
+- ❌ **「删 `cache/` / 改回 `actions/cache`」**：`cache/` 是断网降级与历史累积的命根子。
+- ❌ **「删数据资产 / 删摘要文件 / 清理 `echarts.min.js` / 删 `akshare` / 删 `westock-data`」**：均被 README 明确点名保护。
+- ❌ **「把 `except: pass` 全改抛错」**：局部容错（TTL 状态、日志编码、临时文件清理、上游回退链）是设计，不是缺陷；本次只把**主流程**的静默失败改成显式失败。
+- ❌ 早期报告曾把 GAS 脚本里的 `RECEIVER_EMAIL` 硬编码列为 bug —— **不是 bug**，它是 `CONFIG` 里明确列出的默认配置项，本次未改。
+
+> 若下次 AI 读到 `wj624-仓库体检与整改思路.md` 或 `wj624-整改落地手册.md` 里的 P1/P2 建议，请以本附录为准：**那两份是整改前的中间产物，已作废**。
+
+
+### D. 给 AI 的维护边界（可复制这段）
+
+```
+你在维护 wj624/etf-lsi。动手前：
+1. 先读 README 九、防 Bug 铁律（8 条）与十二、给 AI 的维护提示词（12.4 SOP / 12.5 硬约束），再读本附录。
+2. 绝对不要：删 _exchange_shares.json / _breadth_history.json / westock-data；删 http_json 的 CSV 兜底；
+   简化上交所「开工探测 + 两轮 + 熔断」；用前一日份额顶替缺失日；把 IORB 从 _CAL_EXCLUDE 里拿掉；
+   改 cron 21:17 或 TZ；恢复 monthly-snapshot 自动 schedule；用 force push。
+3. common.py 的 run() 在缺依赖时必须显式抛错，不要「返回空串」——下游会把空串变成 None 静默写进数据。
+4. check_lsi_status.py 是数据完整性闸门，任何读取失败都必须非 0 退出。
+5. 改了数据源/单位/调度，同步 README 四（数据源与单位换算）、五（流水线与产物）、九（铁律）、十二（提示词）。
+6. 线上写操作：精确 git add、中文 commit、git pull --rebase、绝不 force。
+```
+### E. 验证与回滚
+
+| 项目 | 说明 |
+|---|---|
+| 本地验证 | 补丁脚本在从原仓库 `git archive HEAD` 导出的**干净副本**上端到端重跑：59/59 替换、2 处追加、2 个新建 `.gitignore`、5 个 `monthly-snapshot.yml` 降级；`.py` 用 `ast.parse`、`worker.js` 用 `node --check`、`.yml` 用 `yaml.safe_load`，语法自检 26 项全 PASS |
+| README 硬约束复核 | 61 项，实际 61/61 通过（初检 5 项 FAIL 均为检查规则误报） |
+| 线上内容核验 | GitHub API 独立核验：commit 主题、变更文件集合与白名单逐仓一致、**0 删除**、关键修复内容、数据资产 12/12 在线 |
+| 线上实测 | 2026-11-05 串行手动触发 4 个核心 workflow 并逐个核验：4/4 全部 success、每仓产物 commit 均 removed=0、关键数据资产完好。第一次补测在 rotation-monitor 暴露 pandas 3.x 移除 resample('M') 的问题，双保险修复后重跑通过。明细与最终线上 HEAD 见下方「F. 补测实测记录」 |
+| 令牌 / 垃圾 | 交付文件 `ghp_` / `github_pat_` 0 命中；仓库内不生成 `__pycache__` |
+
+**回滚**：优先 `git revert <整改 commit>` 生成反向 commit 再 push（保留历史、无需 force）。整改前基线 `efe6dc4b`，整改 commit `606958f1`（`git revert 606958f1`）。**本仓 `daily.yml` 是 `push` 触发**，本次整改 commit 的 `ETF + LSI daily report` 已 `success`；该 run 之后按 README 设计又产生了自动产物 commit（写本附录时线上 HEAD 已到 `8e8f74f`，会继续前移，这是正常行为，不要当异常）。回滚时若其后已有自动产物 commit，按需一并评估。
+
+**下次改代码前的三行自检**（沿用前文铁律）：
+1. 这个文件是源码还是产物？产物只能靠重跑生成，不能手改。
+2. 改动会不会破坏「数据资产 / 口径 / 阈值 / 单位 / cron / 构建顺序」？会就停手。
+3. 改完要跑什么验证、要同步 README 哪几节？写进 commit body。
+
+### F. 补测实测记录（2026-11-05，含 pandas 3.x 兼容性二次修复）
+
+整改 commit 上线后，用户要求对 4 个「`push` 不触发、只在 `schedule` / `workflow_dispatch` 跑」的核心抓数流水线做**串行手动触发补测**：一个跑完、核验通过，再触发下一个，避免并发写 `main` 冲突。
+
+**第一次补测在 `rotation-monitor` 失败**，日志关键行：
+
+```
+ValueError: 'M' is no longer supported for offsets. Please use 'ME' instead.
+  File ".github/workflows/generate_page.py", line 130, in ...
+    monthly = bd.set_index('date')['close_cyb'].resample('M').last()
+```
+
+根因：pandas 3.1.1 于 2026-11-04 发布，移除了 `resample('M')` 别名，并默认开启 Copy-on-Write、改变字符串 dtype。**整改前依赖本无上界**；本轮整改把上界写成 `<4` 过宽，且 `daily_update.yml` 的 `pip install` 行仍是完全无上界 —— 这是策略失误，已按下面「双保险」纠正。
+
+**双保险修复（3 仓 6 文件）**：
+
+1. **代码**：`rotation-monitor/.github/workflows/generate_page.py` 的 `resample('M')` → `resample('ME')`（pandas 2.3.3 与 3.0.0 下语义一致，均为月末重采样，本地实测两种版本输出一致）。
+2. **依赖**：所有 pandas 约束收紧为 `<3`，且 **`requirements.txt` 与 workflow 的 `pip install` 行两处同步** —— 线上实际执行的是 workflow 里的 pip install，不是 requirements.txt，只改一处等于没改。
+3. **二次 commit**：`rotation-monitor` `ee80a439`、`earl-etf-dashboard` `af8b5237`、`national-team-etf-flow` `b0ef1c6c`。
+
+**修复后重跑，4/4 全部通过**：
+
+| 仓库 / workflow | run id | 结论 | 产物 commit（前 → 后） | 删除 | 关键资产 |
+|---|---|---|---|---|---|
+| `rotation-monitor` / `daily_update.yml` | 41990306988 | success | `ee80a439` → `1c6dd808` | 0 | `public/index.html` 完好 |
+| `us-world-economy-dashboard` / `update.yml` | 41990418511 | success | `e9ee6da9` → `0b18f069` | 0 | `cache/` · `index.html` · `llms.txt` · `snapshot.md` · `version.txt` 完好 |
+| `earl-etf-dashboard` / `update.yml` | 41990472730 | success | `af8b5237` → `abdee20d` | 0 | `cache/` · `version.txt` · `llms.txt` · `latest.json` · `index.html` 完好 |
+| `national-team-etf-flow` / `daily-refresh.yml` | 41990810766 | success | `b0ef1c6c` → `5110f0f1` | 0 | `_etf_shares_cache.json` · `echarts.min.js` · `index.html` 完好 |
+
+> `a-stock-api`（Worker 部署 + 13 个冒烟端点）与 `etf-lsi`（daily report）由 `push` 触发，整改当时即 `success`，不在上表。
+
+**写本附录时各仓 `main` 的线上实况**（均为短 SHA，位数不影响定位）：
+
+| 仓库 | 整改 commit | pandas 二次修复 | 补测产物 / 当前 HEAD |
+|---|---|---|---|
+| `a-stock-api` | `daea02a` | — | `daea02a` |
+| `us-world-economy-dashboard` | `e9ee6da` | — | `0b18f06` |
+| `earl-etf-dashboard` | `75255bd` | `af8b523` | `abdee20` |
+| `national-team-etf-flow` | `016a401` | `b0ef1c6` | `5110f0f` |
+| `rotation-monitor` | `b5f01af` | `ee80a43` | `1c6dd80` |
+| `etf-lsi` | `606958f` | — | `8e8f74f`（自动产物 commit 会继续前移，属正常） |
+
+> **给 AI 的硬约束**：这 3 个仓的 pandas **必须锁 `<3`**，不要「简化」成 `<4` 或去掉上界；`resample('ME')` 不要改回 `'M'`。改依赖时**必须同时改 `requirements.txt` 和 workflow 的 `pip install` 行** —— 第一次补测就是这样崩的。另外这 6 仓**没有单元测试套件**，上述「实测」指真实 workflow 执行 + 产物核验，改完代码仍应手动 dispatch 一次确认。
