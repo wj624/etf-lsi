@@ -46,11 +46,11 @@
 
 - 打开网址**不会触发任何计算、不联网取数**，直接加载最近一次流水线生成好的 HTML，秒开。
 - 网页里所有数据（曲线、LSI 数值、20 项报警）都是**生成时烤死在 HTML 里的**，因此**断网也能看**。
-- 内容只在**每天 19:00 定时任务跑完后**更新一次。也就是说白天打开看到的是**前一晚 19:00 的快照**，不是实时行情。
-- 想立刻刷新：去 `wj624/etf-lsi-monitor` → Actions → **Run workflow**，跑完约 1 分钟后网址即更新。
+- 内容只在**每天 21:17 定时任务跑完后**更新一次。也就是说白天打开看到的是**前一晚 21:17 的快照**，不是实时行情。
+- 想立刻刷新：去本仓库 `wj624/etf-lsi`（`main`）→ Actions → **Run workflow**，跑完约 1 分钟后网址即更新。
 
-代码库 `wj624/etf-lsi-monitor` 保持**私有**，公开仓库里**只有生成的网页文件**，不含任何源码、邮箱凭证或 API Key。
-若哪天不再需要网址，在仓库 Settings → Pages 关掉发布即可，代码仓库不受影响。
+本仓库已公开，源码与配置都在 `main` 分支；`gh-pages` 分支**只有生成的网页文件**，不含任何邮箱凭证或 API Key（密钥只存于 Actions Secrets）。
+若哪天不再需要网址，在仓库 Settings → Pages 关掉发布即可。
 
 ---
 
@@ -67,6 +67,8 @@
 - [九、防 Bug 铁律（改动代码前必读）](#九防-bug-铁律改动代码前必读)
 - [十、常见问题 FAQ](#十常见问题-faq)
 - [十一、已知限制与免责声明](#十一已知限制与免责声明)
+- [十二、给 AI 的维护提示词](#十二给-ai-的维护提示词)
+- [十三、跨资产比价卡片（金银比 / 金油比 / 铜金比 / KOSPI-GOLD）](#十三跨资产比价卡片金银比--金油比--铜金比--kospi-gold)
 
 ---
 
@@ -378,10 +380,10 @@ Worker 跑在 Cloudflare 上，出口 IP 与 runner 完全无关，且自带 KV 
 
 ---
 
-### 4.6 市场环境五件套（估值 / 境内资金面 / 国债曲线 / 折溢价 / 市场宽度）
+### 4.5 市场环境六件套（估值 / 境内资金面 / 国债曲线 / 折溢价 / 市场宽度 / 跨资产比价）
 
-这五项由 `fetch_signals.py` 抓取，写进 `signals.json`，供看板 ⑨～⑬ 五个面板使用。
-**五个端点彼此独立**：任意一个失败，只让对应面板消失，不影响主看板、ETF 背离与宏观 LSI。
+这六项由 `fetch_signals.py` 抓取，写进 `signals.json`，供看板 ⑨～⑬ 五个面板及跨资产比价卡片使用。
+**各端点彼此独立**：任意一个失败，只让对应面板消失，不影响主看板、ETF 背离与宏观 LSI。
 
 | 端点 | 数据源 | 口径要点 | 已知限制 |
 | :--- | :--- | :--- | :--- |
@@ -403,7 +405,7 @@ Worker 跑在 Cloudflare 上，出口 IP 与 runner 完全无关，且自带 KV 
 差异来自是否含北交所与停牌股。**方向与量级都可信，但不做「精确到个位」的承诺**，
 所以看板只展示家数与占比，不做「今日上涨家数同比昨日 ±N」这类依赖精确值的推论。
 
-### 4.7 ⑬ 国债曲线面板怎么读（两张图的横轴不同）
+### 4.6 ⑬ 国债曲线面板怎么读（两张图的横轴不同）
 
 这是整个看板最容易误读的一节：**上下两张图的横轴含义完全不同**。
 
@@ -435,7 +437,7 @@ Worker 跑在 Cloudflare 上，出口 IP 与 runner 完全无关，且自带 KV 
 几个易错点：
 
 - 数据里 `cn_10y_2y` / `cn_30y_10y` 等利差列的单位是 **%**（如 0.3936），看板 ×100 显示成 **bp**（39.4）；`derived.*_bp` 已经是 bp。
-- 「250 日前」是名义叫法。`cn-rates` 会整行剔除上游偶发的全空占位行，请求 250 天通常只剩约 **234 条**（见 4.6 表格），
+- 「250 日前」是名义叫法。`cn-rates` 会整行剔除上游偶发的全空占位行，请求 250 天通常只剩约 **234 条**（见 4.5 表格），
   `rows[0]` 是序列首日、约一年前，并非精确的 250 个交易日前。曲线末端标签同时写相对描述与真实月日，**以日期为准**。
 - 三条线在 30Y 附近可能交叉（长端与短端走势不同步），这是真实形态，不是画错；末端标签为避免重叠做了 13px 强制避让，
   所以标签位置不一定贴着对应线的真实高度。
@@ -455,7 +457,7 @@ daily_run.py
  ├─ fetch_ratios.py      三大风格/股债比价（周K全周期）        → ratios.json      （失败降级）
  ├─ fetch_fred_lsi.py    FRED 20 序列 + LSI + 20 项报警         → lsi.json         （失败降级）
  ├─ analyze_report.py    双宽基诊断                             → summary.json / series_<key>.json
- ├─ fetch_signals.py     市场环境五件套（估值/资金面/国债/折溢价/宽度）→ signals.json（失败降级）
+ ├─ fetch_signals.py     市场环境六件套（估值/资金面/国债/折溢价/宽度/跨资产比价）→ signals.json（失败降级）
  ├─ render.py            高清监测图                             → etf_lsi_monitor_latest.png
  ├─ make_dashboard.py    三合一交互看板                         → etf_lsi_dashboard.html
  └─ send_mail.py         三合一汇总日报邮件                     → mail_preview.html（本地试跑）
@@ -471,10 +473,10 @@ daily_run.py
 | `fetch_fred_lsi.py` | FRED 取数 + LSI/GLI/报警/资金流向/四维诊断，并写出 `lsi_status.json` 数据完整性报告 |
 | `check_lsi_status.py` | 读 `lsi_status.json` + `lsi.json` 决定本轮退出码（有空序列或 asof 跑到未来就标红） |
 | `analyze_report.py` | 双宽基诊断 |
-| `fetch_signals.py` | 市场环境五件套取数（指数估值 / 境内资金面 / 国债曲线 / ETF 折溢价 / 市场宽度），五项独立容错，写 `signals.json` + 追加 `_breadth_history.json` |
+| `fetch_signals.py` | 市场环境六件套取数（指数估值 / 境内资金面 / 国债曲线 / ETF 折溢价 / 市场宽度 / 跨资产比价），六项独立容错，写 `signals.json` + 追加 `_breadth_history.json` |
 | `render.py` | matplotlib 四行布局 PNG |
 | `make_dashboard.py` | 自包含交互 HTML（无外部依赖，离线可看） |
-| `send_mail.py` | 汇总邮件（标题含三状态，正文六段：① ② 双宽基诊断 → ③ 风格/股债性价比 → ④ 宏观 LSI（核心表含 `US02Y − EFFR` 加息/降息周期判据）→ ⑤ 市场环境五件套（估值/资金面/国债/折溢价/宽度，末尾附「一句话综合」）→ ⑥ 内嵌 PNG） |
+| `send_mail.py` | 汇总邮件（标题含三状态，正文六段：① ② 双宽基诊断 → ③ 风格/股债性价比 → ④ 宏观 LSI（核心表含 `US02Y − EFFR` 加息/降息周期判据）→ ⑤ 市场环境六件套（估值/资金面/国债/折溢价/宽度/跨资产比价，末尾附「一句话综合」）→ ⑥ 内嵌 PNG） |
 | `daily_run.py` | 编排入口 |
 | `westock-data/` | 腾讯自选股取数 CLI（Node，零第三方依赖，随仓库携带） |
 
@@ -512,7 +514,7 @@ git remote add origin https://github.com/<你的用户名>/etf-lsi.git
 git push -u origin main
 ```
 
-### 2. 配置密钥（Actions Secrets，必填 4 项）
+### 2. 配置密钥（Actions Secrets，必填项）
 
 | Secret | 值 |
 | :--- | :--- |
@@ -540,7 +542,7 @@ git push -u origin main
 
 **网页发布（无需任何 Secret）**：看板由工作流自动发布到本仓库的 `gh-pages` 分支，GitHub Pages 直接托管，使用内置 `GITHUB_TOKEN`，**不再需要 `GH_PAT`**。开启方式：仓库 → Settings → Pages → Source 选 `gh-pages` 分支（首次工作流运行后该分支会自动生成）。
 
-#### 密钥配置清单（必填 4 项，本仓库不含任何明文）
+#### 密钥配置清单（必填项，以 `.github/workflows/daily.yml` 实际引用为准；本仓库不含任何明文）
 
 仓库 → **Settings → Secrets and variables → Actions → 新建仓库机密**，逐个添加：
 
@@ -627,11 +629,11 @@ schedule:
 `_exchange_shares.json` 同样只保留最近 `ETF_EXCHANGE_DAYS + TAIL` 天（约 260 天），恒定在 0.6 MB。
 **`lsi.json` 故意不缓存**——宏观数据必须每天新算；若缓存，一旦 FRED 抓取失败就会拿前一天的旧文件顶上，
 把陈旧数据当成当日结果发出去。不缓存时，宏观模块失败会让看板直接隐藏该区块，这更诚实。
-**每次运行仍会强制重抓最后 8 个交易日**（ETF 份额 T+1~T+2 披露，需要回填）。
+**每次运行仍会强制重抓最后 5 个交易日**（ETF 份额 T+1~T+2 披露，需要回填）。
 
 ### 6. 产物
 
-每次运行上传 `etf-lsi-report` 构件，含 PNG / HTML / summary.json / ratios.json / lsi.json，90 天内可下载。
+每次运行上传 `etf-lsi-report` 构件，含 PNG / HTML / summary.json / ratios.json / lsi.json，14 天内可下载。
 
 ---
 
@@ -685,7 +687,7 @@ python send_mail.py
 | `ETF_SMTP_PORT_2` | `587` | 【可选】第二个账号端口（Gmail 用 587） |
 | `ETF_DRY_RUN` | — | `1` = 只生成预览不发送 |
 | `FRED_API_KEY` | —（必填，去 Secrets 配置） | FRED API key（不配置则宏观模块降级） |
-| `ETF_REFRESH_TAIL` | `8` | 每次强制重抓的尾部交易日数（份额披露滞后回填） |
+| `ETF_REFRESH_TAIL` | `5` | 每次强制重抓的尾部交易日数（份额披露滞后回填） |
 | `ETF_DAYS` | `1250` | 展示窗口交易日数（≈5 年，超出部分写回缓存时裁掉） |
 | `ETF_CAL_DAYS` | `2000` | 交易日历回看的自然日数（要够 5 年 + 长假余量） |
 | `ETF_KLINE_LIMIT` | `1500` | kline 单次返回行数上限（实测接口最多 1212 行） |
@@ -699,7 +701,6 @@ python send_mail.py
 | `ETF_SZSE_CHUNK` | `20` | 深交所区间请求每段天数（单次上限 65535 行） |
 | `LSI_FETCH_DAYS` | `2700` | FRED 抓取回看自然日（含 5 年展示 + 约 550 日指标预热） |
 | `LSI_CAL_DAYS` | `1300` | 宏观曲线展示的观测日数（≈5 年） |
-| `LSI_CAL_DAYS` | `820` | 宏观交易日历长度（观测日） |
 | `RATIO_SEG_FROM` | `2010` | 周K分段抓取起始年 |
 | `RATIO_PERIOD` | `week` | 比价周期 |
 | `RATIO_TAIL` | `260` | 存入 JSON 的尾部周数 |
@@ -796,7 +797,7 @@ python send_mail.py
 
 **Q6：首次运行很慢？**
 正常。需要抓取约 250 个交易日 × 2 个赛道 ×（1 次指数 + 1 次 ETF 批量）。
-之后靠 `raw_data.json` 缓存，每次只增量抓新增日 + 强制重抓尾部 8 天。
+之后靠 `raw_data.json` 缓存，每次只增量抓新增日 + 强制重抓尾部 5 天。
 
 **Q7：可以只跑其中一个模块吗？**
 可以。三个模块产物互相独立：`fetch_data.py`+`analyze_report.py` 出 A股部分，
@@ -856,7 +857,7 @@ python send_mail.py
 | `make_dashboard.py` | 手写 SVG 渲染整张看板（无图表库，0 依赖） | 所有动态内容由 JS 渲染，不存在占位符子串覆盖问题（见铁律 5） |
 | `render.py` / `analyze_report.py` / `send_mail.py` | PNG 渲染 / 六步指标计算与五档判定 / 邮件组装发送 | 邮件用 `%+.1f`，**别再手动拼接 `+`**（会出 `++12.7`） |
 | `check_lsi_status.py` | **数据完整性闸门**，读 `lsi_status.json`，空序列/兜底异常就非 0 退出 | 工作流最后一步跑它，故意放在「发看板 / 上传 artifact」之后，让当天仍能拿到降级看板 |
-| `fetch_signals.py` | 市场环境五件套（估值/资金面/国债/折溢价/宽度）→ `signals.json` + `_breadth_history.json` | 五项**各自独立容错**，全挂也只是五个面板不出现；新增面板只动这个文件 + `make_dashboard.py` |
+| `fetch_signals.py` | 市场环境六件套（估值/资金面/国债/折溢价/宽度/跨资产比价）→ `signals.json` + `_breadth_history.json` | 六项**各自独立容错**，全挂也只是对应面板不出现；新增面板只动这个文件 + `make_dashboard.py` |
 | `daily_run.py` | 本地一键跑全流程 | — |
 | `.github/workflows/daily.yml` | 调度 + 发布 + 闸门 | `cron: "17 13 * * 1-5"`（北京 21:17）有原因，见 12.3 第 5 条 |
 | `_exchange_shares.json` | 沪市份额缓存（约 260 天，600 KB 上下），**随仓库提交** | 它是「取不到时的真实兜底」，删了就等于把一次限流放大成数据空洞 |
@@ -880,7 +881,7 @@ A 股（境内）  fetch_exchange.py ── a-stock-api Worker ──┬─ quer
   里面有上游映射表、Runbook 和一份可直接复制给 AI 的同步提示词。
   只要 `/api/etf-shares`、`/api/fund-nav`、`/api/trade-calendar` 的**字段名与单位**不变，**本仓库一行都不用改**。
 
-### 12.3 五个必踩坑（按踩坑频率排序）
+### 12.3 六个必踩坑（按踩坑频率排序）
 
 1. **「200 + 空数组」不等于「当天没数据」**（2026-11 的真实事故）
    Worker 曾把上游失败吞成 `200 + {"data":[],"count":0}` 并写进 KV 缓存一小时，客户端把空表当「当天无披露」直接跳过，
@@ -908,14 +909,14 @@ A 股（境内）  fetch_exchange.py ── a-stock-api Worker ──┬─ quer
    - `lsi.json` **故意不缓存**：宏观数据必须每天新算。缓存了，FRED 一失败就拿旧文件顶上，把陈旧数据当当日结果发出去。不缓存时宏观失败会让看板隐藏该块——这更诚实。
    - `_exchange_shares.json` **必须随仓库提交**（不走 `actions/cache`，那份缓存 7 天不用会被清掉，届时又要全量重抓 250 天）。
    - `raw_data.json` / `ratios.json` 走 `actions/cache`，写回前按 `ETF_DAYS`（默认 1250）裁剪窗口，体积恒定 1.6 MB，**不会越长越胖**。
-   - 每次运行强制重抓最后 **8 个交易日**（份额 T+1~T+2 披露，要回填）。
+   - 每次运行强制重抓最后 **5 个交易日**（份额 T+1~T+2 披露，要回填）。
 5. **`cron` 是 21:17 而不是 19:00，`timeout` 是 45 而不是 55**
    纽约联储每天美东 08:00 才公布当日 SOFR / EFFR / IORB，换北京时间是夏令时 20:00 / 冬令时 21:00；
    19:00 跑只能拿到前一天的旧利率。21:17 在两种时制下都晚于美东 08:00，也晚于沪深晚间披露。
    一天只跑一次（避免两封邮件），当天补跑用 `workflow_dispatch`。
    超时 45 分钟是迁移 Worker 之后重算的：250 天回填从「分钟级 + 高失败率」变成「秒级」，依赖从 akshare（连带 pandas）瘦到 4 个包。
 
-6. **市场环境五件套的四个口径陷阱**（2026-11 新增，最容易「看着对其实错」）
+6. **市场环境六件套的四个口径陷阱**（2026-11 新增，最容易「看着对其实错」）
    - **估值字段互补**：`pe_pct` 与 `pe_over_history` 相加恒等于 1，互为倒数关系。看板只用 `pe_pct`，误用另一个会把「贵」看成「便宜」，且数字本身完全合理、不会报错。
    - **回购定盘只回 1 个月**：中国货币网的 `FrrHis` 忽略 `startDate`，永远只返回最近约 21 个交易日，而 SHIBOR 能给 60+ 天。若照原样画，图左侧会出现一大段「只有 SHIBOR、没有 DR007」的空白——现在从首个 DR007 有效点起画。
    - **宽度没有历史**：东财 `push2ex` 三个接口都忽略 `date` 参数，传历史日期仍回当天。所以「回填」在数据源层面不可能，只能每天存一份到 `_breadth_history.json`（**必须随仓库提交**，不提交就永远只有 1 天）。
@@ -968,7 +969,7 @@ A 股（境内）  fetch_exchange.py ── a-stock-api Worker ──┬─ quer
 【先读什么】
 1. README 第四章「数据源、单位换算与剔除项」→ 认两条链路：宏观走 FRED，A 股走自建 Worker。
 2. README 第九章「防 Bug 铁律」8 条 → 都是真实踩坑，禁止回退。
-3. README 第十二章（本章）→ 12.1 文件职责表、12.3 五个坑、12.4 SOP。
+3. README 第十二章（本章）→ 12.1 文件职责表、12.3 六个坑、12.4 SOP。
 4. 要动 A 股取数时，再去读 https://github.com/wj624/a-stock-api 的 README（有上游映射表与同步提示词）。
 
 【硬约束，违反即算错】
@@ -980,7 +981,7 @@ A 股（境内）  fetch_exchange.py ── a-stock-api Worker ──┬─ quer
 - 红涨绿跌（净申购/正 Spread 红 #E8453C，净赎回/负 Spread 绿 #1FB37A），格式化用 %+.1f，不要手拼 "+"。
 - 不允许「用前一交易日份额顶替缺失日」这种兜底。
 - 不要重新引入 akshare（requirements.txt 只保留 matplotlib / numpy / requests / openpyxl）。
-- 市场环境五件套（`fetch_signals.py`）必须保持「各项独立容错」：任一端点失败只让对应面板消失，
+- 市场环境六件套（`fetch_signals.py`）必须保持「各项独立容错」：任一端点失败只让对应面板消失，
   绝不能因为拉不到估值就让整轮看板失败。
 - 估值只用 `pe_pct`，不要用 `pe_over_history`（两者互补，用错会把贵看成便宜且不报错）。
 - `_breadth_history.json` 与 `_exchange_shares.json` 都是随仓库提交的数据资产，不要当产物清理。

@@ -8,16 +8,15 @@ import os, re, json, subprocess, time, shutil, urllib.request
 BASE = os.path.dirname(os.path.abspath(__file__))
 _PKG = os.path.dirname(BASE) if os.path.basename(BASE).lower() == 'app' else BASE
 
+# 不再硬编码任何本机绝对路径（含用户名）：换机器 / CI 时不会误命中，也不泄露本机信息。
+# 优先仓库内 runtime，其次 PATH 里的 node，最后环境变量 NODE_BIN。
 _NODE_CANDIDATES = [
     os.path.join(_PKG, 'runtime', 'node', 'node.exe'),
     os.path.join(BASE, 'runtime', 'node', 'node.exe'),
-    r'C:/Users/33251/.workbuddy/binaries/node/versions/22.22.2/node.exe',
-    r'C:/Users/33251/.workbuddy/binaries/node/versions/22.22.2-6/node.exe',
 ]
 _SKILL_CANDIDATES = [
     os.path.join(BASE, 'westock-data'),
     os.path.join(_PKG, 'westock-data'),
-    r'C:/Users/33251/AppData/Local/Programs/WorkBuddy/resources/app.asar.unpacked/resources/builtin-skills/westock-data',
 ]
 
 
@@ -31,23 +30,30 @@ def find_node():
     w = shutil.which('node') or shutil.which('node.exe')
     if w:
         return w
-    raise RuntimeError('找不到 node：请安装 Node.js 18+，或设置环境变量 NODE_BIN 指向 node.exe')
+    # 导入期不抛错：render.py 等只想用字体 / 表格工具也会 import common，
+    # 缺 node 不该让整轮崩溃；真正需要取数时由 run() 显式报错终止。
+    return ''
 
 
 def find_skill():
     for c in _SKILL_CANDIDATES:
         if os.path.exists(os.path.join(c, 'scripts', 'index.js')):
             return c
-    raise RuntimeError('找不到 westock-data 技能目录（应位于仓库根 westock-data/）')
+    return ''
 
 
 NODE = find_node()
-IDX = os.path.join(find_skill(), 'scripts', 'index.js')
-CWD = os.path.dirname(IDX)
+_SKILL = find_skill()
+IDX = os.path.join(_SKILL, 'scripts', 'index.js') if _SKILL else ''
+CWD = os.path.dirname(IDX) if IDX else BASE
 
 
 def run(args, retry=3, timeout=180):
     """调用 westock-data CLI；stdout 为空视为失败并重试"""
+    if not NODE or not IDX or not os.path.isfile(IDX):
+        # 导入期不抛错；真正取数时缺依赖必须显式失败，绝不静默返回空串
+        # （空串会让下游 parse_kline / first_table 写出空值，违背 README 防 Bug 铁律）
+        raise RuntimeError('westock-data 不可用：node 或技能目录缺失，无法取数（检查 runtime/ 与 westock-data/，或设置 NODE_BIN）')
     for i in range(retry):
         try:
             r = subprocess.run([NODE, IDX] + args, cwd=CWD, capture_output=True,

@@ -77,7 +77,7 @@ def apply_exchange(track, results):
         import fetch_exchange
         ex = fetch_exchange.load_cache()
     except Exception as e:
-        print('  [%s] 交易所缓存不可用，沿用 westock: %s' % (track, str(e)[:80]))
+        print('::warning::  [%s] 交易所缓存不可用，沿用 westock: %s' % (track, str(e)[:80]))
         return 0, 0
     if not ex.get('shares') and not ex.get('nav'):
         print('  [%s] 交易所缓存为空，沿用 westock' % track)
@@ -157,7 +157,7 @@ def build_track(track, days, jobs):
                 if done % 25 == 0:
                     print('  [%s] %d/%d  %.0fs' % (track, done, len(todo), time.time() - t0), flush=True)
             except Exception as e:
-                print('  [%s] FAIL %s %s' % (track, d, e))
+                print('::warning::  [%s] 单日抓取失败 %s %s（留待下一轮回填）' % (track, d, e))
     print('[%s] fetched %d days, %.0fs' % (track, len(results), time.time() - t0))
 
     n_sh, n_nv = apply_exchange(track, results)

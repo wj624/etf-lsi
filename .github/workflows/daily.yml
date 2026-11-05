@@ -49,7 +49,7 @@ jobs:
           path: |
             raw_data.json
             ratios.json
-          key: etf-lsi-data-${{ github.run_id }}
+          key: etf-lsi-data-v1-${{ hashFiles('requirements.txt') }}
           restore-keys: |
             etf-lsi-data-
 
@@ -100,14 +100,14 @@ jobs:
             echo "!! 未生成宽度历史（fetch_signals 未成功），跳过该文件"
           fi
           if [ "${added}" -eq 0 ]; then
-            echo "两个缓存文件都不存在，直接退出"
+            echo "::warning::两个缓存文件都不存在，跳过缓存提交（降级模块未产出，属可容忍）"
             exit 0
           fi
           if git diff --staged --quiet; then
             echo "缓存无变化，跳过提交"
           else
             git commit -m "chore: update caches $(date -u '+%Y-%m-%d %H:%M UTC')"
-            git pull --rebase origin main || { echo "rebase 失败，交由下次调度"; exit 0; }
+            git pull --rebase origin main || { echo "::error::rebase 失败，交由下次调度"; exit 1; }
             git push origin HEAD:main
             echo "缓存已提交"
           fi
@@ -137,7 +137,7 @@ jobs:
         run: |
           set -e
           if [ ! -f etf_lsi_dashboard.html ]; then
-            echo "!! 未生成看板，跳过 Pages 发布"; exit 0
+            echo "::error::未生成看板，终止 Pages 发布"; exit 1
           fi
           mkdir -p public
           cp etf_lsi_dashboard.html public/index.html

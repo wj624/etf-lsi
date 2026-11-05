@@ -1,4 +1,4 @@
-matplotlib
-numpy
-requests
-openpyxl
+matplotlib<4
+numpy<3
+requests<3
+openpyxl<4

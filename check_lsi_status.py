@@ -67,7 +67,9 @@ def main():
             else:
                 print('数据基准日 asof = %s（今天 %s）' % (asof, today))
         except Exception as e:
-            annot('warning', '读取 lsi.json 失败：%s' % e)
+            # README 12.1：本脚本是「数据完整性闸门」，兜底异常必须非 0 退出
+            annot('error', '读取 lsi.json 失败：%s' % e)
+            bad = 1
 
     if bad:
         print('!! 本轮宏观数据不完整，已标记失败（看板仍按现有数据发布）', flush=True)
