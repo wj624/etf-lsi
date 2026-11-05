@@ -28,19 +28,20 @@ jobs:
     # （FRED 序列、图表渲染、发信）仍然宽松。
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: "pip"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "20"
+          package-manager-cache: false
 
       - name: Restore historical data cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           # 只缓存 A股历史与比价（周K，变化慢）。
           # lsi.json 不缓存：宏观数据必须每天新算，若缓存会在 FRED 抓取失败时
@@ -113,7 +114,7 @@ jobs:
 
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: etf-lsi-report
           path: |
