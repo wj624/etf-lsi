@@ -1,5 +1,5 @@
 {
- "updated": "2026-11-05 04:39",
+ "updated": "2026-11-05 09:58",
  "rows": [
   {
    "date": "2026-11-04",
@@ -12,6 +12,18 @@
    "limit_down": 10,
    "max_streak": 3,
    "is_today": false
+  },
+  {
+   "date": "2026-11-05",
+   "up": 4325,
+   "down": 913,
+   "flat": 139,
+   "total": 5377,
+   "up_pct": 80.4,
+   "limit_up": 43,
+   "limit_down": 0,
+   "max_streak": 4,
+   "is_today": true
   }
  ]
 }
