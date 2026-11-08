@@ -10,9 +10,12 @@ fetch_exchange.py（交易所官方 ETF 份额/净值，T+0，替代 westock 的
   → fetch_signals.py（市场环境四件套：估值/境内资金面/折溢价/市场宽度）
   → render.py（高清监测图 PNG）
   → make_dashboard.py（三合一交互 HTML 看板）
+  → make_llm_summary.py（从看板 HTML 内嵌 const D 生成 llms.txt / data.json，给 AI 读）
   → send_mail.py（三合一汇总日报邮件）
 
 fetch_ratios / fetch_fred_lsi / fetch_signals 为增强模块：失败仅降级，不阻断主报告。
+make_llm_summary.py 只读本地看板 HTML、不联网，同样登记为降级不阻断；
+排在 make_dashboard.py 之后，因为要读它刚生成的 etf_lsi_dashboard.html。
 """
 import subprocess, sys, os, json
 
@@ -34,6 +37,8 @@ STEPS = [
     ('fetch_signals.py', False),
     ('render.py', True),
     ('make_dashboard.py', True),
+    # 给 AI 读的文档：纯本地、不联网、失败只降级；必须排在 make_dashboard.py 之后
+    ('make_llm_summary.py', False),
 ]
 
 DEGRADED = []

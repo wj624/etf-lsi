@@ -15,9 +15,15 @@
 | **主地址** | **https://etf-lsi.pages.dev/** | Cloudflare 全球节点，国内多数网络可直连 |
 | **备用地址** | **https://wj624.github.io/etf-lsi/** | GitHub Pages 原生托管 |
 | **看板中心（聚合入口）** | **https://wj-dashboards.pages.dev/** | 一个页面切四个看板，含本看板 |
+| **🤖 发给 AI 的数据文档（llms.txt）** | **https://etf-lsi.pages.dev/llms.txt** | **把这条链接直接粘给大模型**，它就能读到本看板全部指标与结论；备用 https://wj624.github.io/etf-lsi/llms.txt |
 
 > 两个地址是**同一份看板**，每天流水线跑完会同时更新，内容完全一致。
 > 国内打不开 `github.io` 时请用主地址；图标与添加到主屏幕后的体验也完全一样。
+>
+> **给 AI 用（无需上传任何文件）**：复制上表「发给 AI 的数据文档」那条链接发给大模型即可。
+> 它是一份**每天随看板自动更新**的纯文本快照，覆盖双宽基 ETF 诊断、宏观 LSI 20 项报警、
+> 风格/股债比价、市场环境六件套与跨资产比价；同目录 `data.json` 是机器可读全量数据。
+> 两条线路（Cloudflare / GitHub Pages）内容完全一致，国内优先用 `pages.dev`。
 
 手机微信 / Safari / Chrome 直接打开上面任一网址，然后：
 
@@ -1211,3 +1217,110 @@ ValueError: 'M' is no longer supported for offsets. Please use 'ME' instead.
 
 - 验证：改完用 `yaml.safe_load` 校验；在 Actions 手动 dispatch（**不勾选 force**）应看到 `below threshold: nothing to do, main history untouched`，且 `main` HEAD 不变、工作区无改动。
 - 回滚本策略：`git revert <本策略 commit>` 即可回到「仅手动入口」的第一版状态；数据资产与其它 workflow 均不受影响。
+
+
+---
+
+## 附录 · 2026-11-08 新增「给 AI 读的文档」llms.txt / data.json（给维护者 / 给 AI 读）
+
+> **怎么读**：改任何代码前，先读本 README 第九章「防 Bug 铁律」8 条与第十二章「给 AI 的维护提示词」
+> （12.4 SOP / 12.5 硬约束），再读本附录。**冲突时以前文铁律为准**；本附录只解释本次改动，
+> 不新增、不覆盖任何设计口径。
+
+### A. 这次要解决什么
+
+用户要把一个**链接直接发给 AI**，让 AI 读到本仓库「所有输出数据及内容」，而无需打开 556 KB 的看板 HTML
+（里面全是 JS，AI 抓不动）或手动上传文件。参照 `wj624/earl-etf-dashboard` 的 `llms.txt` 约定，
+新增一份每日自动更新的纯文本快照，并把链接登记在文首「📱 手机端访问地址」表格里。
+
+### B. 交付物与链接
+
+| 文件 | 用途 | 主地址 | 备用地址 |
+| :--- | :--- | :--- | :--- |
+| `llms.txt` | 人话快照，约 25 KB，AI 抓取入口 | https://etf-lsi.pages.dev/llms.txt | https://wj624.github.io/etf-lsi/llms.txt |
+| `data.json` | 机器可读全量数据，约 420 KB | https://etf-lsi.pages.dev/data.json | https://wj624.github.io/etf-lsi/data.json |
+
+两个域名内容完全一致：`daily.yml` 把两者一起复制进 `public/`，同一份 `public/`
+既 `git push --force` 到 `gh-pages` 分支，又由 `wrangler pages deploy public` 上传到 Cloudflare Pages。
+
+### C. 单一真相源（最重要的一条）
+
+`make_llm_summary.py` **只读 `make_dashboard.py` 刚生成的 `etf_lsi_dashboard.html` 里内嵌的 `const D`**。
+`const D` 本身就是看板页面上展示的全部数据（两条 ETF 主线、LSI 20 项报警、ratios、signals 六件套、
+跨资产比价），因此：
+
+- **不重新取数、不联网、不读任何密钥、不新增依赖**；
+- AI 读到的数值与用户在页面上看到的**逐值一致**，不存在两份口径；
+- 改指标口径 / 阈值 / 单位只需照旧改 `config.py` 等上游，`llms.txt` 会自动跟着变；
+- `data.json` 就是 `const D` 原样导出（`json.dumps` 紧凑格式），不做任何加工。
+
+> 不要为了「让 AI 读起来更全」去另写一份抓数逻辑。那会造出第二条数据链路，正是本仓铁律最忌讳的。
+
+### D. 每天怎么自动更新
+
+```
+daily.yml (北京 21:17, 周一~周五)
+  → python daily_run.py
+       … fetch_* → analyze_report → render → make_dashboard.py（生成 etf_lsi_dashboard.html）
+       → make_llm_summary.py（本附录新增；fatal=False，读上面那个 HTML，写 llms.txt / data.json）
+       → send_mail.py
+  → Persist caches
+  → Upload artifacts（清单已加 llms.txt / data.json）
+  → Publish dashboard to GitHub Pages：复制进 public/ → push --force 到 gh-pages
+  → Publish to Cloudflare Pages：wrangler pages deploy public
+  → Check LSI data completeness（数据闸门，位置不变）
+```
+
+- `daily_run.py` 的 `STEPS` 里，`make_llm_summary.py` **必须排在 `make_dashboard.py` 之后**（要读它的产物），
+  且登记为 `fatal=False`（降级不阻断）。
+- `daily.yml` 的 `public/` 组装用 `if [ -f … ]; then cp …; else echo "::warning::…"`，
+  **缺文件只告警、看板照常发布**，不新增任何失败点；cron、push 路径、取数步骤、发信、数据闸门一律未动。
+
+### E. 降级边界（为什么不会把主报告搞挂）
+
+生成器内置三层保护：源 HTML 缺失 / `const D` 解析失败 / 生成或写文件异常 →
+一律打印 `::warning::` 并 `return 0`，**绝不写空文件、绝不抛异常、绝不让主报告失败**。
+字段缺失时用 `.get()` 兜底显示「—」，不会 KeyError；`llms.txt` 里也明确写了
+「— = 本轮该模块降级隐藏，不等于数值为 0」，避免 AI 误读。
+
+因此最坏情况只是「这次没有 AI 文档」，看板、邮件、告警全部照常。
+`llms.txt` / `data.json` 未生成时，`public/` 里那两行会打印 warning，日志可查。
+
+### F. 产物为什么不提交到 main
+
+`llms.txt` / `data.json` 是**每天重建的发布产物**，只放进 `public/` 由 `gh-pages` / Cloudflare Pages 托管：
+
+- 提交到 `main` 会留下永不更新的过期副本，AI 若读到 main 上的那份就会拿到旧数据；
+- `gh-pages` 每次是 `git init` + 单 commit + `--force`，**历史不累积**，420 KB/天不会把仓库撑大；
+- `monthly-snapshot.yml` 的 50 MB 单文件护栏扫的是 `main` 的 `git ls-files`，与这两个产物无关。
+
+本地调试用 `python make_llm_summary.py --check`（只打印不写文件）或
+`--out /tmp/xxx --src /path/to.html`，不要往工作区根目录留产物。
+
+### G. 给 AI 的维护边界（可复制这段）
+
+1. 先读第九章铁律 8 条、第十二章 12.4/12.5，再读本附录。
+2. **不要**手改 `index.html` / `etf_lsi_dashboard.html` / `llms.txt` / `data.json` —— 全是构建产物，
+   会被下次流水线覆盖。要改 `llms.txt` 的内容，只改 `make_llm_summary.py`。
+3. **不要**删 `daily_run.py` 里 `make_llm_summary.py` 那一步，也不要把它挪到 `make_dashboard.py` 之前。
+4. **不要**删 `daily.yml` 里 `public/` 组装的两行 `if [ -f … ]`，也不要把 `|| true` 改成无容错的 `cp`
+   （那样生成器降级时会新增一个失败点，违反「降级只隐藏对应区块」的设计）。
+5. **不要**给生成器加联网抓数、加密钥、加 pip 依赖；它只读本地 HTML。
+6. 新增指标 / 改字段名时，同步改 `make_llm_summary.py` 的 `CORE_CN`、`RATIO_ORDER` 与对应段落；
+   缺字段会显示「—」，但不会报错。
+7. 改了数据源 / 单位 / 调度，照旧同步 README 第四章、第九章、第十二章。
+8. 线上写操作照旧：精确 `git add`、中文 commit、`git pull --rebase`、**绝不 force**。
+
+### H. 验证与回滚
+
+- 本地验证脚本 `verify_etf_lsi_llm.py`：内容覆盖、与 `const D` 逐值一致、`--check` 不写文件、
+  5 类降级路径（源缺失 / 无 `const D` / 非法 JSON / 极简 D / 默认源发现）共 **82 项**，全部通过。
+- 改 `daily.yml` 会按仓库原有设计（`on.push.paths`）**自动触发一次完整流水线**，用于实测。
+- 线上核验：两个域名的 `llms.txt` / `data.json` 均 HTTP 200 且内容一致、`index.html` 未受影响、
+  `gh-pages` 分支含这两个文件。
+- 回滚：`git revert <本次 commit>` 即可。生成器是纯新增文件，删掉它并回退
+  `daily_run.py` / `daily.yml` / `README.md` 三处增量，看板与邮件链路完全不受影响。
+
+### I. 云端 workflow 实测记录
+
+> 待本次提交推送后回填（run 编号、产物提交、线上核验结果）。

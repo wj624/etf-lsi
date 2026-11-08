@@ -125,6 +125,8 @@ jobs:
             lsi.json
             lsi_status.json
             signals.json
+            llms.txt
+            data.json
           if-no-files-found: ignore
           retention-days: 14
 
@@ -144,6 +146,10 @@ jobs:
           cp etf_lsi_monitor_latest.png public/monitor.png 2>/dev/null || true
           cp icon-180.png icon-192.png icon-512.png public/ 2>/dev/null || true
           cp manifest.json public/ 2>/dev/null || true
+          # 给 AI 读的文档（make_llm_summary.py 生成）：随看板一起发布到 gh-pages 与 Cloudflare Pages。
+          # 生成器降级时不会写空文件，此处缺文件只告警、看板照常发布（不新增失败点）。
+          if [ -f llms.txt ]; then cp llms.txt public/; else echo "::warning::llms.txt 未生成（AI 文档降级），看板照常发布"; fi
+          if [ -f data.json ]; then cp data.json public/; else echo "::warning::data.json 未生成（AI 文档降级），看板照常发布"; fi
           touch public/.nojekyll
           cd public
           git init -q
@@ -153,6 +159,7 @@ jobs:
           git commit -q -m "chore: update dashboard $(date -u '+%Y-%m-%d %H:%M UTC')"
           git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" HEAD:gh-pages
           echo "已发布到 https://wj624.github.io/etf-lsi/"
+          echo "AI 文档: https://wj624.github.io/etf-lsi/llms.txt 与 https://etf-lsi.pages.dev/llms.txt"
 
       # 同步发布到 Cloudflare Pages：国内可达性明显优于 github.io。
       # 采用 Direct Upload（不走 CF 的 Git 集成），--branch 必须与项目生产分支 gh-pages 一致，
