@@ -1323,4 +1323,37 @@ daily.yml (北京 21:17, 周一~周五)
 
 ### I. 云端 workflow 实测记录
 
-> 待本次提交推送后回填（run 编号、产物提交、线上核验结果）。
+**结论：一次通过，无需人工补数或重跑。**
+
+| 项目 | 结果 |
+| :--- | :--- |
+| 源码提交 | `818c25e`（4 files changed, 691 insertions，全部纯增量） |
+| 触发方式 | `push` 自动触发（改了 `.github/workflows/daily.yml`，命中 `on.push.paths`） |
+| workflow run | **`42473207082`**，[日志](https://github.com/wj624/etf-lsi/actions/runs/42473207082) |
+| 运行时间 | 2026-11-08 10:51:46Z ~ 10:54:39Z（约 2 分 53 秒），12 个 step 全通过 |
+| 结论 | `success`（`Check LSI data completeness` 也通过，说明当天宏观数据完整） |
+| gh-pages 部署提交 | `ae245d3`（`chore: update dashboard 2026-11-08 10:54 UTC`） |
+| 发布文件 | `llms.txt` 25,630 B；`data.json` 420,364 B；`index.html` 555,857 B 未受影响 |
+| 线上核验 | `verify_etf_lsi_online.py` **46 PASS / 0 FAIL** |
+
+**四个线上地址逐条核验**（全部 HTTP 200，且正文不是 HTML 回退）：
+
+| 地址 | 内容 | 结果 |
+| :--- | :--- | :--- |
+| `https://etf-lsi.pages.dev/llms.txt` | 人话快照 | 通过：纯文本正文，含全部章节 |
+| `https://etf-lsi.pages.dev/data.json` | 全量 JSON | 通过：合法 JSON，含 `tracks` |
+| `https://wj624.github.io/etf-lsi/llms.txt` | 人话快照 | 通过：与 pages.dev 字节一致 |
+| `https://wj624.github.io/etf-lsi/data.json` | 全量 JSON | 通过：与 pages.dev 字节一致 |
+
+**单一真相源已验证**：线上 `data.json` 与看板 `index.html` 内嵌 `const D` **全量逐值等价**，
+AI 读到的数字与人在页面看到的完全一致；Cloudflare / GitHub Pages 两条线路内容字节一致。
+
+> **注意（写给以后维护的人 / AI）**：Cloudflare Pages 对 `public/` 里不存在的路径会返回
+> **HTTP 200 + `text/html` 的看板首页**（SPA 回退），而不是 404。发布前基线里 `/llms.txt`、
+> `/data.json` 就是这样「伪 200」——光看状态码会误判成「已经发布成功」。所以核验必须同时看
+> **`content-type` 非 text/html**、**正文不是 `<!DOCTYPE html`**，并确认 `llms.txt` 含章节标题、
+> `data.json` 能 `json.loads`。本轮四项全部通过。`github.io` 那条线路没有这个行为，缺文件会
+> 老实返回 404，可用来交叉验证。
+
+**回滚**：`git revert 818c25e` 后由 `on.push.paths` 自动触发一次 workflow 重新发布；产物不入库，
+回滚不会在 `main` 留下永不更新的过期副本（详见 H 节）。
