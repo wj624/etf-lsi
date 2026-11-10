@@ -94,6 +94,36 @@ def kv_table(rows, head=('项目', '数值')):
     return out
 
 
+def cn_liq_center(liq):
+    """与看板 renderCnLiquidity() 内 winStat() 完全同算法：
+       末 WIN=20 行内跳过 null，n>=3 才返回 (均值, min, max, n)。
+       纯本地计算，不联网、不改口径 —— ⑨ 的 20 日中枢 / 波动区间是浏览器现算的，
+       不落 const D，所以这里按同一算法自算一份，让 AI 也能读到这个派生值。
+    """
+    rows = [r for r in (liq.get('data') or []) if isinstance(r, dict) and r.get('date')]
+    if not rows:
+        return None
+    WIN = 20
+    vals = []
+    for r in rows:
+        v = r.get('dr001')
+        vals.append(float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None)
+    i = len(rows) - 1
+    ssum, n = 0.0, 0
+    lo, hi = float('inf'), float('-inf')
+    for j in range(max(0, i - WIN + 1), i + 1):
+        x = vals[j]
+        if x is None:
+            continue
+        ssum += x
+        n += 1
+        if x < lo:
+            lo = x
+        if x > hi:
+            hi = x
+    return (ssum / n, lo, hi, n) if n >= 3 else None
+
+
 def load_data(src):
     raw = io.open(src, encoding='utf-8').read()
     key = 'const D = '
@@ -365,15 +395,47 @@ def build(d):
             A('')
         liq = sig.get('liquidity') or {}
         if liq.get('latest'):
-            A('### ② 境内资金面（SHIBOR / DR / FR，单位 % 年化）')
+            A('### ② 境内资金面（DR001 / SHIBOR 隔夜 O/N / FR001，单位 % 年化）')
             A('')
-            A('> 派生量为 **bp**（1bp = 0.01 个百分点）。')
+            A('> 派生量为 **bp**（1bp = 0.01 个百分点）。⑨ 面板口径自 **2026-11-10** 起：'
+              '主线由 `DR007` **换锚为 `DR001`**（2026-11-02 后央行调控目标），DR007 退居辅助；'
+              '灰虚线全名为「**SHIBOR 隔夜 O/N**」，不可简写成「隔夜」。')
+            A('')
+            A('> **20 日中枢 / 波动区间全自动**：`CENTER` = `dr001` 末 20 行有值点均值，'
+              '`LO~HI` = 同窗口 min~max，随每日数据滚动；**不硬编码政策利率**，'
+              '央行调息后看板零改动自动跟随。下表按页面 `winStat()` 同一算法自算，'
+              '让 AI 也能读到这个「浏览器现算、不落数据文件」的派生值。')
+            A('')
+            st = cn_liq_center(liq)
+            if st:
+                c, lo, hi, n = st
+                lt = liq.get('latest') or {}
+                cur = lt.get('dr001')
+                dev = ((float(cur) - c) * 100
+                       if isinstance(cur, (int, float)) and not isinstance(cur, bool) else None)
+                L.extend(kv_table([
+                    ('20 日中枢 `CENTER`（%）', num(c, 4)),
+                    ('同窗口波动区间 `LO~HI`（%）', '%s ~ %s' % (num(lo, 4), num(hi, 4))),
+                    ('窗口内有值交易日 `n`', str(n)),
+                    ('DR001 距中枢（bp）', ('%+.1f' % dev) if dev is not None else '—'),
+                ], ('⑨ 面板派生项（本地自算）', '值')))
+                A('')
+            A('> **两个 bp 基准不同，禁止混读**：「距中枢」= `DR001 − CENTER`（纵向，今天 vs 近期常态）；'
+              '「FR001 分层溢价」= `FR001 − DR001`（横向，全市场 vs 银行间）。'
+              '副图蓝虚线 `±round(dm/2)` 是**自适应辅助刻度、不是告警阈值**，越过不触发任何动作；'
+              '沪深300 归一紫线用于对照「利率松紧 vs 指数涨跌」，不可删。')
+            A('')
+            A('> DR001 历史仅约 1 个月（上游中国货币网回购定盘只回最近约 21 个交易日），'
+              '图上以「DR001 数据起点」竖虚线标注，**不是数据缺失**。')
             A('')
             L.extend(kv_table([('`%s`' % k, num(v, 4) if isinstance(v, float) else s(v))
                                for k, v in (liq.get('latest') or {}).items()],
                               ('字段', '最新值')))
             A('')
             if liq.get('derived'):
+                A('> `derived` 里 `dr007_ma20` / `dr007_vs_ma20_bp` 等仍以 DR007 为主，'
+                  '是给 ⑨ 第 4 张 DR007 卡片用的，**不是「没跟着换锚」**。')
+                A('')
                 L.extend(kv_table([('`%s`' % k, num(v, 4) if isinstance(v, float) else s(v))
                                    for k, v in liq['derived'].items()], ('派生字段', '值 (bp)')))
                 A('')
