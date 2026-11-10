@@ -1079,7 +1079,7 @@ $('shareBlocks').innerHTML = sh;
   // 图例直接带最新值，省掉右端堆叠的标签，避免 4 条线标签互相压
   $('liqCnLegend').innerHTML = '<span><i style="background:#FF8A1F"></i>DR007 ' + fmt(lastVal('dr007'), 3) + '%（左轴）</span>'
     + '<span><i style="background:#4C9AFF"></i>SHIBOR 3M ' + fmt(lastVal('shibor_3m'), 3) + '%（左轴）</span>'
-    + '<span><i style="background:#8A93A3"></i>隔夜 ' + fmt(lastVal('shibor_on'), 3) + '%（左轴）</span>'
+    + '<span><i style="background:#8A93A3"></i>SHIBOR 隔夜 O/N ' + fmt(lastVal('shibor_on'), 3) + '%（左轴）</span>'
     + (baseIdx ? '<span><i style="background:#9B6BFF"></i>' + esc(idxName) + (lastIdxVal === null ? '' : ' 归一 ' + lastIdxVal.toFixed(1)) + '（右轴）</span>' : '');
 
   const W = 1000, H = 300, Lf = 54, R = 78, Tp = 14, B = 26;
@@ -1195,7 +1195,7 @@ $('shareBlocks').innerHTML = sh;
     let h = '<b>' + esc(r.date) + '</b>'
       + '<div style="color:#FF8A1F">DR007 ' + (r.dr007 === null || r.dr007 === undefined ? '—' : fmt(r.dr007, 3) + '%') + '</div>'
       + '<div style="color:#4C9AFF">SHIBOR 3M ' + (r.shibor_3m === null || r.shibor_3m === undefined ? '—' : fmt(r.shibor_3m, 3) + '%') + '</div>'
-      + '<div style="color:#8A93A3">隔夜 ' + (r.shibor_on === null || r.shibor_on === undefined ? '—' : fmt(r.shibor_on, 3) + '%') + '</div>';
+      + '<div style="color:#8A93A3">SHIBOR 隔夜 O/N ' + (r.shibor_on === null || r.shibor_on === undefined ? '—' : fmt(r.shibor_on, 3) + '%') + '</div>';
     if (baseIdx) {
       const iv = idxMap[r.date];
       h += '<div style="color:#9B6BFF">' + esc(idxName) + ' 归一 ' + (iv === null || iv === undefined ? '—' : iv.toFixed(1)) + '</div>';
