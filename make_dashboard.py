@@ -325,7 +325,7 @@ border-radius:10px;padding:12px 15px;margin-bottom:10px;font-size:12.8px;line-he
 </div>
 
 <div class="panel" id="liqCnPanel" style="display:none">
-  <h2>⑨ 境内资金面（DR001 / 政策锚）· 与 ⑤ 的境外流动性互为对照 <span id="liqCnBadge" style="display:none;margin-left:10px;padding:2px 9px;border-radius:9px;font-size:11.5px;border:1px solid;font-weight:400"></span></h2>
+  <h2>⑨ 境内资金面（DR001 / 20 日中枢）· 与 ⑤ 的境外流动性互为对照 <span id="liqCnBadge" style="display:none;margin-left:10px;padding:2px 9px;border-radius:9px;font-size:11.5px;border:1px solid;font-weight:400"></span></h2>
   <div class="hint" id="liqCnHint"></div>
   <div class="legend" id="liqCnLegend"></div>
   <div class="zbar" id="liqCnBar">
@@ -1011,27 +1011,39 @@ $('shareBlocks').innerHTML = sh;
   const rows = (L.data || []).filter(r => r && r.date);
   if (rows.length < 5) return;
   $('liqCnPanel').style.display = '';
-  /* 2026-11-02 换锚：隔夜逆回购 1.25% 成为主要政策利率，DR001 为调控目标。
-     走廊 ±25bp 为按公告「加减点幅度不变」推算，官方未单独公布上下限数值。
-     央行日后调整政策利率时只需改这里一处；下方 anchorStale 会自动提示核对。 */
-  const POLICY = { rate: 1.25, bandBp: 25, from: '2026-11-02' };
-  const BAND = POLICY.bandBp / 100;
-  const devBp = v => (v === null || v === undefined || isNaN(v)) ? null : (v - POLICY.rate) * 100;
-  const lt0 = L.latest || {};
-  const dev0 = devBp(lt0.dr001);
-  const anchorStale = dev0 !== null && Math.abs(dev0) > POLICY.bandBp * 1.5;
+  /* 全自动：不硬编码任何官方利率数值。
+     中枢 = DR001 近 WIN 个交易日均值，护栏 = 同窗口最低~最高区间，
+     均由每日数据自动滚动；央行调息后 DR001 中枢会自行移动，无需改代码。 */
+  const WIN = 20;
+  const drVals = rows.map(r => (r.dr001 !== null && r.dr001 !== undefined && !isNaN(r.dr001)) ? Number(r.dr001) : null);
+  const winStat = i => {
+    let s = 0, n = 0, lo = Infinity, hi = -Infinity;
+    for (let j = Math.max(0, i - WIN + 1); j <= i; j++) {
+      const v = drVals[j];
+      if (v === null) continue;
+      s += v; n++;
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+    return n >= 3 ? { center: s / n, lo: lo, hi: hi } : null;
+  };
+  const STAT = winStat(rows.length - 1);
+  const CENTER = STAT ? STAT.center : null;
+  const LO = STAT ? STAT.lo : null;
+  const HI = STAT ? STAT.hi : null;
+  const devBp = (v, base) => (v === null || v === undefined || isNaN(v) || base === null || base === undefined) ? null : (v - base) * 100;
+  const dev0 = devBp((L.latest || {}).dr001, CENTER);
   let firstDr = -1;
   for (let i = 0; i < rows.length; i++) {
-    if (rows[i].dr001 !== null && rows[i].dr001 !== undefined) { firstDr = i; break; }
+    if (drVals[i] !== null) { firstDr = i; break; }
   }
   const badge = $('liqCnBadge');
   if (badge) {
     let txt, col;
-    if (anchorStale) { txt = '政策利率可能已变更 · 请核对'; col = '#F5A623'; }
-    else if (dev0 === null) { txt = 'DR001 数据待更新'; col = '#8A93A3'; }
-    else if (Math.abs(dev0) <= 10) { txt = '贴合政策锚 · 资金平稳'; col = '#1FB37A'; }
-    else if (dev0 > 0) { txt = '高于锚 ' + dev0.toFixed(1) + 'bp · 资金偏紧'; col = '#E8453C'; }
-    else { txt = '低于锚 ' + Math.abs(dev0).toFixed(1) + 'bp · 资金偏松'; col = '#4C9AFF'; }
+    if (dev0 === null) { txt = 'DR001 数据待更新'; col = '#8A93A3'; }
+    else if (Math.abs(dev0) <= 3) { txt = '贴合 20 日中枢 · 资金平稳'; col = '#1FB37A'; }
+    else if (dev0 > 0) { txt = '高于中枢 ' + dev0.toFixed(1) + 'bp · 资金偏紧'; col = '#E8453C'; }
+    else { txt = '低于中枢 ' + Math.abs(dev0).toFixed(1) + 'bp · 资金偏松'; col = '#4C9AFF'; }
     badge.textContent = txt;
     badge.style.display = '';
     badge.style.color = col;
@@ -1080,15 +1092,12 @@ $('shareBlocks').innerHTML = sh;
   const bp = v => (v === null || v === undefined) ? '—' : (v > 0 ? '+' : '') + Number(v).toFixed(1) + ' bp';
   const bpCol = v => (v === null || v === undefined) ? 'var(--sub)' : (v > 0 ? 'var(--up)' : (v < 0 ? 'var(--down)' : 'var(--txt)'));
 
-  $('liqCnHint').innerHTML = '银行间资金价格，年化 %。<b>' + POLICY.from + ' 换锚后</b>，'
-    + '央行主要政策利率为隔夜逆回购 <b>' + POLICY.rate.toFixed(2) + '%</b>、调控目标为 <b>DR001</b>；'
-    + 'DR001 在锚上方＝资金偏紧，下方＝偏松。浅蓝带为窄走廊 ±' + POLICY.bandBp + 'bp（<b>按公告推算，非官方公布值</b>）。'
+  $('liqCnHint').innerHTML = '银行间资金价格，年化 %。<b>DR001</b> 为银行间隔夜回购成交利率，曲线上行＝资金收紧、下行＝转松。'
+    + '绿色虚线＝<b>DR001 近 ' + WIN + ' 日中枢</b>，浅蓝带＝同窗口最低~最高波动区间，<b>均由每日数据自动计算，无需人工维护</b>。'
     + '<b>右轴紫线为 ' + esc(idxName) + ' 归一=100，用来对照「利率松紧 vs 指数涨跌」</b>，下方副图同样叠加了这条紫线。'
     + 'SHIBOR 3M ' + fmt(lt.shibor_3m, 3) + '%｜3M−隔夜 ' + bp(dv.term_spread_3m_on_bp) + '。'
     + (lt.date ? '　最新 ' + esc(lt.date) : '')
-    + '　<b>数据源：中国货币网</b>；DR001 / DR007 / FR001 上游仅回溯约 1 个月（线在后段，竖虚线为 DR001 数据起点），SHIBOR 更长。'
-    + (anchorStale ? '　<span style="color:#F5A623"><b>注意：政策利率可能已变更，请核对 POLICY.rate</b></span>' : '');
-
+    + '　<b>数据源：中国货币网</b>；DR001 / DR007 / FR001 历史较短（线在后段，竖虚线为 DR001 数据起点），SHIBOR 更长。';
   const spreadBp = (lt.fr001 != null && lt.dr001 != null) ? (lt.fr001 - lt.dr001) * 100 : null;
   let dayChgBp = null;
   for (let i = rows.length - 1; i > 0; i--) {
@@ -1099,11 +1108,11 @@ $('shareBlocks').innerHTML = sh;
   let ch = '';
   ch += '<div class="card"><div class="k">DR001 · 隔夜目标利率</div>'
       + '<div class="v" style="color:var(--cyan)">' + fmt(lt.dr001, 3) + '%</div>'
-      + '<div class="d">距锚 <span style="color:' + bpCol(devBp(lt.dr001)) + '">' + bp(devBp(lt.dr001)) + '</span>'
+      + '<div class="d">距中枢 <span style="color:' + bpCol(devBp(lt.dr001, CENTER)) + '">' + bp(devBp(lt.dr001, CENTER)) + '</span>'
       + '｜日变 <span style="color:' + bpCol(dayChgBp) + '">' + bp(dayChgBp) + '</span></div></div>';
-  ch += '<div class="card"><div class="k">政策锚 · 隔夜逆回购</div>'
-      + '<div class="v" style="color:var(--down)">' + POLICY.rate.toFixed(3) + '%</div>'
-      + '<div class="d">' + POLICY.from + ' 换锚｜走廊 ±' + POLICY.bandBp + 'bp（推算）</div></div>';
+  ch += '<div class="card"><div class="k">20 日中枢 · 自动滚动</div>'
+      + '<div class="v" style="color:var(--down)">' + fmt(CENTER, 3) + '%</div>'
+      + '<div class="d">窗口 ' + WIN + ' 日｜区间 ' + fmt(LO, 3) + '~' + fmt(HI, 3) + '%</div></div>';
   ch += '<div class="card"><div class="k">FR001 分层溢价</div>'
       + '<div class="v" style="color:var(--purple)">' + bp(spreadBp) + '</div>'
       + '<div class="d">FR001 ' + fmt(lt.fr001, 3) + '%｜走阔＝非银借钱变难</div></div>';
@@ -1112,18 +1121,18 @@ $('shareBlocks').innerHTML = sh;
       + '<div class="d">20 日均 ' + fmt(dv.dr007_ma20, 3) + '｜5 日 ' + bp(dv.dr007_chg_5d_bp) + '</div></div>';
   $('liqCnCards').innerHTML = ch;
 
-  // 图例直接带最新值；政策锚与走廊为固定参考，不随缩放变化
+  // 图例直接带最新值；中枢与波动区间均由每日数据自动计算
   $('liqCnLegend').innerHTML = '<span><i style="background:#22D3EE"></i>DR001 ' + fmt(lastVal('dr001'), 3) + '%（左轴·主线）</span>'
-    + '<span><i style="background:#1FB37A"></i>政策锚 ' + POLICY.rate.toFixed(2) + '%（' + POLICY.from + '）</span>'
-    + '<span><i style="background:#B5D4F4"></i>窄走廊 ' + (POLICY.rate - BAND).toFixed(2) + '~' + (POLICY.rate + BAND).toFixed(2) + '%（±' + POLICY.bandBp + 'bp 推算）</span>'
+    + '<span><i style="background:#1FB37A"></i>20 日中枢 ' + fmt(CENTER, 3) + '%（自动）</span>'
+    + '<span><i style="background:#B5D4F4"></i>20 日区间 ' + fmt(LO, 3) + '~' + fmt(HI, 3) + '%（自动）</span>'
     + '<span><i style="background:#FF8A1F"></i>DR007 ' + fmt(lastVal('dr007'), 3) + '%（左轴）</span>'
     + '<span><i style="background:#4C9AFF"></i>SHIBOR 3M ' + fmt(lastVal('shibor_3m'), 3) + '%（左轴）</span>'
     + '<span><i style="background:#8A93A3"></i>SHIBOR 隔夜 O/N ' + fmt(lastVal('shibor_on'), 3) + '%（左轴）</span>'
     + (baseIdx ? '<span><i style="background:#9B6BFF"></i>' + esc(idxName) + (lastIdxVal === null ? '' : ' 归一 ' + lastIdxVal.toFixed(1)) + '（右轴·对照）</span>' : '');
   const devHint = $('liqCnDevHint');
   if (devHint) {
-    devHint.innerHTML = '<b>② 距政策锚的偏离（bp，放大显示）</b>　左轴青线＝DR001 偏离，'
-      + '绿虚线＝贴合锚 0bp，蓝虚线＝走廊 ±' + POLICY.bandBp + 'bp（推算）；'
+    devHint.innerHTML = '<b>② 距 20 日中枢的偏离（bp，放大显示）</b>　左轴青线＝DR001 偏离，'
+      + '绿虚线＝贴合中枢 0bp，蓝虚线＝半幅波动参考（均自动）；'
       + '<b>紫线＝' + esc(idxName) + ' 归一（右轴）</b>，与上方主图同一对照：资金转松通常对应指数走强。';
   }
 
@@ -1149,7 +1158,7 @@ $('shareBlocks').innerHTML = sh;
       if (v !== null && v !== undefined && !isNaN(v)) { if (v < mn) mn = v; if (v > mx) mx = v; }
     }
     if (!isFinite(mn)) { mn = 0; mx = 1; }
-    mn = Math.min(mn, POLICY.rate); mx = Math.max(mx, POLICY.rate);
+    if (CENTER !== null) { mn = Math.min(mn, CENTER); mx = Math.max(mx, CENTER); }
     const pd0 = (mx - mn) * 0.2 || 0.05; mn -= pd0; mx += pd0;
     const Y = v => Tp + (mx - v) / (mx - mn) * (H - B - Tp);
 
@@ -1211,24 +1220,28 @@ $('shareBlocks').innerHTML = sh;
         + (s.dash ? ' stroke-dasharray="' + s.dash + '"' : '') + ' stroke-linejoin="round"/>';
     }
 
-    // 走廊带与政策锚：裁剪到画布内，不撑开 Y 轴（避免压扁利率线）
-    const yBandTop = Y(POLICY.rate + BAND), yBandBot = Y(POLICY.rate - BAND);
-    const cTop = Math.max(Tp, Math.min(H - B, yBandTop));
-    const cBot = Math.max(Tp, Math.min(H - B, yBandBot));
+    // 动态护栏：20 日波动区间 + 中枢线，全部由数据自动计算，裁剪到画布内不撑开 Y 轴
     let refLayer = '';
-    if (cBot > cTop) {
-      refLayer += '<rect x="' + Lf + '" y="' + cTop.toFixed(1) + '" width="' + (W - Lf - R) + '" height="' + (cBot - cTop).toFixed(1) + '" fill="#B5D4F4" opacity="0.16"/>';
-      if (yBandTop >= Tp && yBandTop <= H - B) {
-        refLayer += '<line x1="' + Lf + '" y1="' + yBandTop.toFixed(1) + '" x2="' + (W - R) + '" y2="' + yBandTop.toFixed(1) + '" stroke="#85B7EB" stroke-width="1" stroke-dasharray="5 4"/>';
-      }
-      if (yBandBot >= Tp && yBandBot <= H - B) {
-        refLayer += '<line x1="' + Lf + '" y1="' + yBandBot.toFixed(1) + '" x2="' + (W - R) + '" y2="' + yBandBot.toFixed(1) + '" stroke="#85B7EB" stroke-width="1" stroke-dasharray="5 4"/>';
+    if (LO !== null && HI !== null) {
+      const yHi = Y(HI), yLo = Y(LO);
+      const cTop = Math.max(Tp, Math.min(H - B, yHi));
+      const cBot = Math.max(Tp, Math.min(H - B, yLo));
+      if (cBot > cTop) {
+        refLayer += '<rect x="' + Lf + '" y="' + cTop.toFixed(1) + '" width="' + (W - Lf - R) + '" height="' + (cBot - cTop).toFixed(1) + '" fill="#B5D4F4" opacity="0.16"/>';
+        if (yHi >= Tp && yHi <= H - B) {
+          refLayer += '<line x1="' + Lf + '" y1="' + yHi.toFixed(1) + '" x2="' + (W - R) + '" y2="' + yHi.toFixed(1) + '" stroke="#85B7EB" stroke-width="1" stroke-dasharray="5 4"/>';
+        }
+        if (yLo >= Tp && yLo <= H - B) {
+          refLayer += '<line x1="' + Lf + '" y1="' + yLo.toFixed(1) + '" x2="' + (W - R) + '" y2="' + yLo.toFixed(1) + '" stroke="#85B7EB" stroke-width="1" stroke-dasharray="5 4"/>';
+        }
       }
     }
-    const yAnc = Y(POLICY.rate);
-    if (yAnc >= Tp && yAnc <= H - B) {
-      refLayer += '<line x1="' + Lf + '" y1="' + yAnc.toFixed(1) + '" x2="' + (W - R) + '" y2="' + yAnc.toFixed(1) + '" stroke="#1FB37A" stroke-width="1.6" stroke-dasharray="6 4"/>'
-        + '<text x="' + (W - R - 5) + '" y="' + (yAnc - 5).toFixed(1) + '" fill="#1FB37A" font-size="10.5" text-anchor="end">政策锚 ' + POLICY.rate.toFixed(2) + '%</text>';
+    if (CENTER !== null) {
+      const yC = Y(CENTER);
+      if (yC >= Tp && yC <= H - B) {
+        refLayer += '<line x1="' + Lf + '" y1="' + yC.toFixed(1) + '" x2="' + (W - R) + '" y2="' + yC.toFixed(1) + '" stroke="#1FB37A" stroke-width="1.6" stroke-dasharray="6 4"/>'
+          + '<text x="' + (W - R - 5) + '" y="' + (yC - 5).toFixed(1) + '" fill="#1FB37A" font-size="10.5" text-anchor="end">' + WIN + ' 日中枢 ' + fmt(CENTER, 3) + '%</text>';
+      }
     }
     if (firstDr >= view.i0 && firstDr <= view.i1 && firstDr > view.i0) {
       const fx = X(firstDr).toFixed(1);
@@ -1238,14 +1251,14 @@ $('shareBlocks').innerHTML = sh;
 
     svg.innerHTML = g + refLayer + axL + axR + idxPath + ratePaths + xt;
 
-    // 副图：DR001 距政策锚的偏离（bp）放大显示，并叠加沪深300 归一（右轴）作对照
+    // 副图：DR001 距 20 日中枢的偏离（bp）放大显示，并叠加沪深300 归一（右轴）作对照
     const devSvg = $('liqCnDevChart');
     if (devSvg) {
       const DH = 120, DT = 14, DB = 20;
       let devs = [], dm = 8;
       for (let i = view.i0; i <= view.i1; i++) {
         const v = rows[i].dr001;
-        const d = (v === null || v === undefined || isNaN(v)) ? null : (v - POLICY.rate) * 100;
+        const d = (CENTER === null || v === null || v === undefined || isNaN(v)) ? null : (v - CENTER) * 100;
         devs.push(d);
         if (d !== null) dm = Math.max(dm, Math.abs(d) * 1.35);
       }
@@ -1258,10 +1271,9 @@ $('shareBlocks').innerHTML = sh;
         dg += '<line x1="' + Lf + '" y1="' + y.toFixed(1) + '" x2="' + (W - R) + '" y2="' + y.toFixed(1) + '" stroke="#2A2F39" stroke-width="1"/>';
       }
       dg += '<line x1="' + Lf + '" y1="' + DY(0).toFixed(1) + '" x2="' + (W - R) + '" y2="' + DY(0).toFixed(1) + '" stroke="#1FB37A" stroke-width="1.2" stroke-dasharray="5 4"/>';
-      if (POLICY.bandBp <= dm) {
-        dg += '<line x1="' + Lf + '" y1="' + DY(POLICY.bandBp).toFixed(1) + '" x2="' + (W - R) + '" y2="' + DY(POLICY.bandBp).toFixed(1) + '" stroke="#85B7EB" stroke-width="1" stroke-dasharray="4 3"/>';
-        dg += '<line x1="' + Lf + '" y1="' + DY(-POLICY.bandBp).toFixed(1) + '" x2="' + (W - R) + '" y2="' + DY(-POLICY.bandBp).toFixed(1) + '" stroke="#85B7EB" stroke-width="1" stroke-dasharray="4 3"/>';
-      }
+      const half = Math.max(1, Math.round(dm / 2));
+      dg += '<line x1="' + Lf + '" y1="' + DY(half).toFixed(1) + '" x2="' + (W - R) + '" y2="' + DY(half).toFixed(1) + '" stroke="#85B7EB" stroke-width="1" stroke-dasharray="4 3"/>';
+      dg += '<line x1="' + Lf + '" y1="' + DY(-half).toFixed(1) + '" x2="' + (W - R) + '" y2="' + DY(-half).toFixed(1) + '" stroke="#85B7EB" stroke-width="1" stroke-dasharray="4 3"/>';
       let dax = '';
       dax += '<text x="' + (Lf - 8) + '" y="' + (DT + 4) + '" fill="#8A93A3" font-size="10.5" text-anchor="end">+' + dm + 'bp</text>';
       dax += '<text x="' + (Lf - 8) + '" y="' + (DY(0) + 4).toFixed(1) + '" fill="#1FB37A" font-size="10.5" text-anchor="end">0</text>';
@@ -1321,8 +1333,8 @@ $('shareBlocks').innerHTML = sh;
     i = Math.max(view.i0, Math.min(view.i1, i));
     const r = rows[i];
     let h = '<b>' + esc(r.date) + '</b>'
-      + '<div style="color:#1FB37A">政策锚 ' + POLICY.rate.toFixed(2) + '%</div>'
-      + '<div style="color:#22D3EE">DR001 ' + (r.dr001 == null ? '—' : fmt(r.dr001, 3) + '%（距锚 ' + bp(devBp(r.dr001)) + '）') + '</div>'
+      + '<div style="color:#1FB37A">' + WIN + ' 日中枢 ' + fmt(CENTER, 3) + '%</div>'
+      + '<div style="color:#22D3EE">DR001 ' + (r.dr001 == null ? '—' : fmt(r.dr001, 3) + '%（距中枢 ' + bp(devBp(r.dr001, CENTER)) + '）') + '</div>'
       + '<div style="color:#FF8A1F">DR007 ' + (r.dr007 == null ? '—' : fmt(r.dr007, 3) + '%') + '</div>'
       + '<div style="color:#4C9AFF">SHIBOR 3M ' + (r.shibor_3m == null ? '—' : fmt(r.shibor_3m, 3) + '%') + '</div>'
       + '<div style="color:#8A93A3">SHIBOR 隔夜 O/N ' + (r.shibor_on == null ? '—' : fmt(r.shibor_on, 3) + '%') + '</div>';
