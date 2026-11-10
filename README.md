@@ -1400,4 +1400,25 @@ AI 读到的数字与人在页面看到的完全一致；Cloudflare / GitHub Pag
 
 ### J.1 云端 workflow 实测记录
 
-> 待本次提交推送并手动 dispatch 后回填（run 编号、线上核验结果）。
+**结论：一次通过，无需人工补数或重跑。**
+
+| 项目 | 结果 |
+| :--- | :--- |
+| 源码提交 | `74b2062`（2 files changed：`make_llm_summary.py` + `README.md`） |
+| 触发方式 | **手动 `workflow_dispatch`**（改的是 `make_llm_summary.py`，不在 `on.push.paths` 内，push 不会自动跑；这正是 J 节提醒的点） |
+| workflow run | **`42824146650`**，[日志](https://github.com/wj624/etf-lsi/actions/runs/42824146650) |
+| 运行时间 | 2026-11-10 13:23:58Z ~ 13:27:09Z（约 3 分 06 秒），12 个 step 全通过 |
+| 结论 | `success`（`Check LSI data completeness` 也通过） |
+| gh-pages 部署提交 | `68b66ad`（`chore: update dashboard 2026-11-10 13:26 UTC`） |
+| 发布文件 | `llms.txt` 27,216 B（含 ⑨ 派生项小表）；`data.json` 420,455 B；`index.html` 565,182 B 未受影响 |
+| 本地验证 | 生成器 `verify_etf_lsi_llm9.py` **58 PASS / 0 FAIL**；补丁 `patch_etf_lsi_llm9.py` 13 PASS |
+| 线上核验 | `verify_etf_lsi_llm9_online.py` **44 PASS / 0 FAIL** |
+
+**线上核验要点**（四条地址都验了正文，防 Cloudflare 伪 200）：
+
+- CF / GH 两条线路的 `llms.txt` **逐字节一致**，且含新标题「DR001 / SHIBOR 隔夜 O/N / FR001」、旧标题已消失、含「⑨ 面板派生项（本地自算）」小表、20 日中枢 `CENTER`、波动区间 `LO~HI`、两个 bp 基准说明、「不是告警阈值」、`derived` 仍以 DR007 为主的说明、9 个 `##` 章节。
+- CF / GH 的 `data.json` **逐字节一致**，且与线上看板 `const D` **全量逐值等价**（⑨ 改版没动 `const D` 结构，AI 文档链路完好）。
+- 看板首页仍 HTTP 200，仍含 `renderCnLiquidity` / `winStat / WIN = 20` / `SHIBOR 隔夜 O/N`；GitHub Pages 构建 `built`、无错误。
+- 自算中枢按前端 `winStat()` 同一算法（末 20 行跳过 `null`、`n>=3`）得 `CENTER ≈ 1.2786%`、`LO~HI 1.26~1.32`、`n=20`，与页面现算一致；`dr001` 不足时只跳过小表、不影响其它章节、不报错。
+
+**回滚**：`git revert 74b2062` 后手动 `workflow_dispatch` 一次重新发布即可；`llms.txt` / `data.json` 只进 `public/` 发布到 `gh-pages` / Cloudflare，不在 `main` 留过期副本（详见 H 节）。
