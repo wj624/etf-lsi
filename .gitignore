@@ -14,3 +14,6 @@ __pycache__/
 *.html
 !README.md
 .env
+
+# 打赏收款码（README 引用，显式放行；其余图片仍忽略）
+!assets/sponsor-wechat.png
