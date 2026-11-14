@@ -35,6 +35,17 @@
 
 失败不影响主流程：取不到就返回 None，上层回退 westock 原值。
 """
+import os
+
+
+# 自建 Worker 鉴权：密钥只从环境变量读取，绝不写进代码或提交历史
+def _worker_headers(extra=None):
+    h = dict(extra or {})
+    k = os.environ.get("A_STOCK_API_KEY", "")
+    if k:
+        h["X-API-Key"] = k
+    return h
+
 import io, json, os, random, sys, threading, time, datetime
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -129,7 +140,7 @@ def _api_get(path, params=None, tries=3):
     last = None
     for i in range(tries):
         try:
-            r = requests.get(API_BASE + path, params=(params or {}), timeout=API_TIMEOUT)
+            r = requests.get(API_BASE + path, params=(params or {}), timeout=API_TIMEOUT, headers=_worker_headers())
             r.raise_for_status()
             j = r.json()
             if isinstance(j, dict) and j.get('error'):
