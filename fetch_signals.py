@@ -11,6 +11,16 @@
 """
 import json
 import os
+
+
+# 自建 Worker 鉴权：密钥只从环境变量读取，绝不写进代码或提交历史
+def _worker_headers(extra=None):
+    h = dict(extra or {})
+    k = os.environ.get("A_STOCK_API_KEY", "")
+    if k:
+        h["X-API-Key"] = k
+    return h
+
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -44,7 +54,7 @@ def _get(path, params=None, tries=3):
     last = None
     for i in range(tries):
         try:
-            r = _SESS.get(API_BASE + path, params=params or {}, timeout=TIMEOUT)
+            r = _SESS.get(API_BASE + path, params=params or {}, timeout=TIMEOUT, headers=_worker_headers())
             if r.status_code >= 500:
                 raise RuntimeError('HTTP %d' % r.status_code)
             j = r.json()
