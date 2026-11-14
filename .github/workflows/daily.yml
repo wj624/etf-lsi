@@ -22,6 +22,8 @@ permissions:
 jobs:
   report:
     runs-on: ubuntu-latest
+    env:
+      A_STOCK_API_KEY: ${{ secrets.A_STOCK_API_KEY }}
     # 45 -> 原为 55。份额回填已从 akshare 换成自建 a-stock-api Worker（Cloudflare 出口 +
     # KV 缓存），250 天回填从「分钟级 + 高失败率」降到「秒级」；依赖安装也从 akshare
     # （连带 pandas）瘦身为 requests + openpyxl，装依赖快了一大截。45 分钟对剩余环节
